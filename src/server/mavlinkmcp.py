@@ -1,11 +1,12 @@
 # Add lifespan support for startup/shutdown with strong typing
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from mcp.server.fastmcp import Context, FastMCP
 from typing import Tuple
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
+from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
@@ -21,6 +22,7 @@ logger.addHandler(handler)
 @dataclass
 class MAVLinkConnector:
     drone: System
+    last_offboard_position: PositionNedYaw = field(default_factory=lambda: PositionNedYaw(0.0, 0.0, 0.0, 0.0))
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
@@ -68,23 +70,80 @@ async def arm_drone(ctx: Context) -> bool:
 
 # Get Position
 @mcp.tool()
-async def get_position(ctx: Context, relative: bool) -> Tuple[int,int,int]:
+async def get_position(ctx: Context) -> dict:
     """
-    Get the position of the drone.
+    Get the position of the drone in latitude/longitude degrees and atittude in meters.
+    The drone must be connected and have a global position estimate.
 
     Args:
-        ctx (Context): the context.
-        relative (bool): is the position relative to the home or to global coordinate system.
+        ctx (Context): The context of the request.
 
     Returns:
-        Tuple[int,int,int]: position.
+        dict: A dict with the position.
     """
-    pass 
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching drone position")
+
+    try:
+        async for position in drone.telemetry.position():
+            return {"status": "success", "position": {
+                "latitude_deg": position.latitude_deg,
+                "longitude_deg": position.longitude_deg,
+                "absolute_altitude_m": position.absolute_altitude_m,
+                "relative_altitude_m": position.relative_altitude_m
+            }}
+    except Exception as e:
+        logger.error(f"Failed to retrieve position: {e}")
+        return str({"status": "failed"})
+
+async def start_offboard_mode(connector: MAVLinkConnector) -> bool:
+    """
+    Start the offboard mode for the drone and set the initial NED position.
+
+    Args:
+        connector (MAVLinkConnector): The MAVLinkConnector instance.
+
+    Returns:
+        bool: True if offboard mode was started successfully, False otherwise.
+    """
+    drone = connector.drone
+    logger.info("Setting initial setpoint for offboard mode")
+    await drone.offboard.set_position_ned(connector.last_offboard_position)
+
+    logger.info("Starting offboard mode")
+    try:
+        await drone.offboard.start()
+        logger.info("Offboard mode started successfully")
+        return True
+    except OffboardError as error:
+        logger.error(f"Starting offboard mode failed with error code: {error._result.result}")
+        return False
+
+async def stop_offboard_mode(connector: MAVLinkConnector) -> bool:
+    """
+    Stop the offboard mode for the drone.
+
+    Args:
+        connector (MAVLinkConnector): The MAVLinkConnector instance.
+
+    Returns:
+        bool: True if offboard mode was stopped successfully, False otherwise.
+    """
+    drone = connector.drone
+    logger.info("Stopping offboard mode")
+
+    try:
+        await drone.offboard.stop()
+        logger.info("Offboard mode stopped successfully")
+        return True
+    except OffboardError as error:
+        logger.error(f"Stopping offboard mode failed with error code: {error._result.result}")
+        return False
 
 @mcp.tool()
 async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> bool:
     """
-    Move the drone relative to the current position. The drone must be armed.
+    Move the drone relative to the current position. The drone must be armed and offboard mode must be active.
 
     Args:
         ctx (Context): the context.
@@ -96,11 +155,27 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
     Returns:
         bool: success flag.
     """
+    connector = ctx.request_context.lifespan_context
+    drone = connector.drone
+
+    # Activate offboard mode
+    if not await start_offboard_mode(connector):
+        return False
+
+    # Update the last offboard position
+    connector.last_offboard_position.north_m += fb
+    connector.last_offboard_position.east_m += lr
+    connector.last_offboard_position.down_m += -altitude
+    connector.last_offboard_position.yaw_deg += yaw
+
+    # Send the updated position
+    logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
+    await drone.offboard.set_position_ned(connector.last_offboard_position)
 
     return True
 
 @mcp.tool()
-async def takeoff(ctx: Context, takeoff_altitude: float = 10.0) -> bool:
+async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> bool:
     """Command the drone to initiate takeoff and ascend to a specified altitude. The drone must be armed.
 
     Args:
@@ -132,14 +207,15 @@ async def land(ctx: Context) -> bool:
     return True
 
 @mcp.tool()
-async def print_status_text(ctx: Context) -> None:
-    """Print status text from the drone."""
+async def print_status_text(ctx: Context) -> dict:
+    """Print and return status text from the drone."""
     drone = ctx.request_context.lifespan_context.drone
     try:
         async for status_text in drone.telemetry.status_text():
             logger.info(f"Status: {status_text.type}: {status_text.text}")
+            return {"type": status_text.type, "text": status_text.text}  # Return a single dict
     except asyncio.CancelledError:
-        return
+        return {"message": "Failed to retrieve status text"}  # Return a failure message
 
 @mcp.tool()
 async def get_imu(ctx: Context, n: int = 1) -> list:
@@ -188,16 +264,21 @@ async def get_imu(ctx: Context, n: int = 1) -> list:
     return imu_data
 
 @mcp.tool()
-async def print_mission_progress(ctx: Context) -> None:
+async def print_mission_progress(ctx: Context) -> dict:
     """
-    Print the mission progress of the drone.
+    Print and return the current mission progress of the drone.
 
     Args:
         ctx (Context): The context of the request.
+
+    Returns:
+        dict: A dictionary containing the current and total mission progress.
     """
     drone = ctx.request_context.lifespan_context.drone
     async for mission_progress in drone.mission.mission_progress():
         logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
+        return {"current": mission_progress.current, "total": mission_progress.total}
+
 
 
 @mcp.tool()
@@ -270,6 +351,26 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     await drone.mission.start_mission()
 
     return True
+
+@mcp.tool()
+async def get_flight_mode(ctx: Context) -> str:
+    """
+    Get the current flight mode of the drone.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        str: The current flight mode of the drone.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        flight_mode = await drone.telemetry.flight_mode().__anext__()
+        logger.info(f"FlightMode: {flight_mode}")
+        return str(flight_mode)
+    except StopAsyncIteration:
+        logger.error("Failed to retrieve flight mode")
+        return "Unknown"
 
 
 if __name__ == "__main__":
