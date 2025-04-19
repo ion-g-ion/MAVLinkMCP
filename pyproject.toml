@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "mavlinkmcp"
+version = "0.1.0"
+description = "A MAVLink Mission Control Platform"
+authors = ["Ion Gabriel <ion.ion.gabriel@gmail.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+mavsdk = "*"
+mcp-server = "*"
+
+[project]
+name = "mavlinkmcp"
+version = "0.1.0"
+description = "A MAVLink Mission Control Platform"
+authors = [{name = "Ion Gabriel", email = "ion.ion.gabriel@gmail.com"}]
+license = {text = "MIT"}
+dependencies = [
+    "mavsdk",
+    "mcp-server"
+]
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

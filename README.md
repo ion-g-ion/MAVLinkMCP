@@ -1,18 +1,10 @@
 # MAVLink MCP Server
 
-This repository contains a Python-based Model Context Protocol (MCP) server for interacting with MAVLink-enabled devices. The server is designed to facilitate communication and control of drones or other MAVLink-compatible systems.
-
-## Features
-
-- **MCP Protocol**: Implements the MCP protocol for standardized communication.
-- **MAVLink Integration**: Supports MAVLink for drone communication.
-- **Configurable**: Uses YAML configuration files for easy customization.
-- **Logging**: Provides robust logging for debugging and monitoring.
+This repository contains a Python-based Model Context Protocol (MCP) server for interacting with MAVLink-enabled devices, such as drones running PX4 software. 
 
 ## Prerequisites
 
 - Python 3.10 or higher
-- Linux operating system (recommended for compatibility)
 
 ## Installation
 
@@ -27,10 +19,6 @@ This repository contains a Python-based Model Context Protocol (MCP) server for 
    pip install -r requirements.txt
    ```
 
-3. Configure the server:
-   - Update `fastagent.config.yaml` for logging and other settings.
-   - Add your secrets to `fastagent.secrets.yaml` (excluded from version control).
-
 ## Usage
 
 Run the MCP server with the following command:
@@ -38,24 +26,16 @@ Run the MCP server with the following command:
 python src/server/mavlinkmcp.py
 ```
 
-## Project Structure
+Alternatively, you can run the server using `uv run`:
+```bash
+uv run src/server/mavlinkmcp.py
+```
 
-```
-MAVLinkMCP/
-├── agent.py
-├── fastagent.config.yaml
-├── fastagent.jsonl
-├── fastagent.secrets.yaml
-├── LICENSE
-├── main.py
-├── pyproject.toml
-├── README.md
-├── src/
-│   ├── __init__.py
-│   ├── server/
-│   │   ├── __init__.py
-│   │   ├── mavlinkmcp.py
-```
+## Example agent usage
+
+An example client is implemented in `example_agent.py` using the `fastagent` library. This demonstrates how to create an AI agent that interacts with the MCP server and supports human input for controlling a drone.
+Export the OpenAI key before running it.
+
 
 ## Contributing
 
