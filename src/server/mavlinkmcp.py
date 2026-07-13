@@ -19,6 +19,45 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+
+def clamp_takeoff_altitude(takeoff_altitude: float, min_m: float = 0.5, max_m: float = 120.0) -> float:
+    """Clamp takeoff altitude to a safe, finite range for agent-driven takeoff."""
+    try:
+        alt = float(takeoff_altitude)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"takeoff_altitude must be a number: {e}") from e
+    if alt != alt:  # NaN
+        raise ValueError("takeoff_altitude must be finite (got NaN)")
+    if alt == float("inf") or alt == float("-inf"):
+        raise ValueError("takeoff_altitude must be finite")
+    if alt < min_m:
+        return min_m
+    if alt > max_m:
+        return max_m
+    return alt
+
+
+def validate_relative_move(lr: float, fb: float, altitude: float, yaw: float, max_abs_m: float = 500.0) -> None:
+    """Reject non-finite or absurdly large relative move requests (fail-closed)."""
+    for name, val in (("lr", lr), ("fb", fb), ("altitude", altitude), ("yaw", yaw)):
+        try:
+            v = float(val)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{name} must be a number: {e}") from e
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError(f"{name} must be finite")
+        if name != "yaw" and abs(v) > max_abs_m:
+            raise ValueError(f"{name} magnitude {abs(v)} exceeds max_abs_m={max_abs_m}")
+
+
+def tool_ok(**payload):
+    return {"status": "success", **payload}
+
+
+def tool_err(message, **payload):
+    return {"status": "error", "message": str(message), **payload}
+
+
 @dataclass
 class MAVLinkConnector:
     drone: System
@@ -60,12 +99,16 @@ mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 
 # ARM
 @mcp.tool()
-async def arm_drone(ctx: Context) -> bool:
-    """Arm the drone."""
+async def arm_drone(ctx: Context) -> dict:
+    """Arm the drone. Returns a structured status dict (fail-closed on errors)."""
     drone = ctx.request_context.lifespan_context.drone
     logger.info("Arming")
-    await drone.action.arm()
-    return True
+    try:
+        await drone.action.arm()
+        return tool_ok(armed=True)
+    except Exception as e:
+        logger.error("Arm failed: %s", e)
+        return tool_err(e, armed=False)
 
 
 # Get Position
@@ -94,7 +137,7 @@ async def get_position(ctx: Context) -> dict:
             }}
     except Exception as e:
         logger.error(f"Failed to retrieve position: {e}")
-        return str({"status": "failed"})
+        return tool_err(e)
 
 async def start_offboard_mode(connector: MAVLinkConnector) -> bool:
     """
@@ -141,9 +184,11 @@ async def stop_offboard_mode(connector: MAVLinkConnector) -> bool:
         return False
 
 @mcp.tool()
-async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> bool:
+async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> dict:
     """
     Move the drone relative to the current position. The drone must be armed and offboard mode must be active.
+
+    Validates finite deltas and rejects absolute components over 500 m (fail-closed).
 
     Args:
         ctx (Context): the context.
@@ -153,58 +198,87 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
         yaw (float): yaw change.
 
     Returns:
-        bool: success flag.
+        dict: structured status (success or error).
     """
     connector = ctx.request_context.lifespan_context
     drone = connector.drone
 
+    try:
+        validate_relative_move(lr, fb, altitude, yaw)
+    except ValueError as e:
+        logger.error("Invalid relative move: %s", e)
+        return tool_err(e)
+
     # Activate offboard mode
     if not await start_offboard_mode(connector):
-        return False
+        return tool_err("failed to start offboard mode")
 
-    # Update the last offboard position
-    connector.last_offboard_position.north_m += fb
-    connector.last_offboard_position.east_m += lr
-    connector.last_offboard_position.down_m += -altitude
-    connector.last_offboard_position.yaw_deg += yaw
+    try:
+        # Update the last offboard position
+        connector.last_offboard_position.north_m += fb
+        connector.last_offboard_position.east_m += lr
+        connector.last_offboard_position.down_m += -altitude
+        connector.last_offboard_position.yaw_deg += yaw
 
-    # Send the updated position
-    logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
-    await drone.offboard.set_position_ned(connector.last_offboard_position)
-
-    return True
+        # Send the updated position
+        logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
+        await drone.offboard.set_position_ned(connector.last_offboard_position)
+        return tool_ok(
+            north_m=connector.last_offboard_position.north_m,
+            east_m=connector.last_offboard_position.east_m,
+            down_m=connector.last_offboard_position.down_m,
+            yaw_deg=connector.last_offboard_position.yaw_deg,
+        )
+    except Exception as e:
+        logger.error("Relative move failed: %s", e)
+        return tool_err(e)
 
 @mcp.tool()
-async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> bool:
+async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
     """Command the drone to initiate takeoff and ascend to a specified altitude. The drone must be armed.
 
     Args:
         ctx (Context): The context of the request.
-        takeoff_altitude (float): The altitude to ascend to after takeoff. Default is 10.0 meters.
+        takeoff_altitude (float): Altitude in meters after takeoff. Default is 3.0 m.
+            Values are clamped to [0.5, 120.0] for fail-closed agent use.
 
     Returns:
-        bool: True if the takeoff command was initiated successfully.
+        dict: structured status including the altitude actually commanded.
     """
     drone = ctx.request_context.lifespan_context.drone
-    logger.info("Initiating takeoff")
-    await drone.action.set_takeoff_altitude(takeoff_altitude)
-    await drone.action.takeoff()
-    return True
+    try:
+        altitude = clamp_takeoff_altitude(takeoff_altitude)
+    except ValueError as e:
+        logger.error("Invalid takeoff altitude: %s", e)
+        return tool_err(e)
+
+    logger.info("Initiating takeoff to %s m", altitude)
+    try:
+        await drone.action.set_takeoff_altitude(altitude)
+        await drone.action.takeoff()
+        return tool_ok(takeoff_altitude_m=altitude)
+    except Exception as e:
+        logger.error("Takeoff failed: %s", e)
+        return tool_err(e)
 
 @mcp.tool()
-async def land(ctx: Context) -> bool:
+async def land(ctx: Context) -> dict:
     """Command the drone to initiate landing at its current location.
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        bool: True if the land command was initiated successfully.
+        dict: structured status (success or error).
     """
     drone = ctx.request_context.lifespan_context.drone
     logger.info("Initiating landing")
-    await drone.action.land()
-    return True
+    try:
+        await drone.action.land()
+        return tool_ok(landing=True)
+    except Exception as e:
+        logger.error("Land failed: %s", e)
+        return tool_err(e)
 
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
