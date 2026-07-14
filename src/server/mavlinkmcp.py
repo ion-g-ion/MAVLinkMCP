@@ -19,6 +19,88 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+
+def tool_ok(**payload):
+    return {"status": "success", **payload}
+
+
+def tool_err(message, **payload):
+    return {"status": "error", "message": str(message), **payload}
+
+
+def validate_mission_points(
+    mission_points,
+    min_rel_alt_m: float = 0.5,
+    max_rel_alt_m: float = 500.0,
+    max_speed_m_s: float = 30.0,
+):
+    """Validate waypoint list for initiate_mission (raise ValueError if invalid).
+
+    Returns a shallow-copied list of point dicts after basic numeric checks.
+    """
+    if not isinstance(mission_points, list):
+        raise ValueError("mission_points must be a list")
+    if len(mission_points) == 0:
+        raise ValueError("mission_points must be a non-empty list")
+
+    required = (
+        "latitude_deg",
+        "longitude_deg",
+        "relative_altitude_m",
+        "speed_m_s",
+        "is_fly_through",
+    )
+    validated = []
+    for idx, point in enumerate(mission_points):
+        if not isinstance(point, dict):
+            raise ValueError(f"mission_points[{idx}] must be a dict")
+        for key in required:
+            if key not in point:
+                raise ValueError(f"Missing required field in mission point: '{key}'")
+        try:
+            lat = float(point["latitude_deg"])
+            lon = float(point["longitude_deg"])
+            rel_alt = float(point["relative_altitude_m"])
+            speed = float(point["speed_m_s"])
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"mission_points[{idx}] numeric fields invalid: {e}") from e
+
+        for name, v in (
+            ("latitude_deg", lat),
+            ("longitude_deg", lon),
+            ("relative_altitude_m", rel_alt),
+            ("speed_m_s", speed),
+        ):
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ValueError(f"mission_points[{idx}].{name} must be finite")
+
+        if not (-90.0 <= lat <= 90.0):
+            raise ValueError(
+                f"Invalid latitude_deg: {lat}. Must be between -90 and 90."
+            )
+        if not (-180.0 <= lon <= 180.0):
+            raise ValueError(
+                f"Invalid longitude_deg: {lon}. Must be between -180 and 180."
+            )
+        if not (min_rel_alt_m <= rel_alt <= max_rel_alt_m):
+            raise ValueError(
+                f"relative_altitude_m {rel_alt} outside [{min_rel_alt_m}, {max_rel_alt_m}]"
+            )
+        if not (0.0 < speed <= max_speed_m_s):
+            raise ValueError(
+                f"speed_m_s {speed} outside (0, {max_speed_m_s}]"
+            )
+
+        cleaned = dict(point)
+        cleaned["latitude_deg"] = lat
+        cleaned["longitude_deg"] = lon
+        cleaned["relative_altitude_m"] = rel_alt
+        cleaned["speed_m_s"] = speed
+        cleaned["is_fly_through"] = bool(point["is_fly_through"])
+        validated.append(cleaned)
+    return validated
+
+
 @dataclass
 class MAVLinkConnector:
     drone: System
@@ -282,75 +364,62 @@ async def print_mission_progress(ctx: Context) -> dict:
 
 
 @mcp.tool()
-async def initiate_mission(ctx: Context, mission_points: list, return_to_launch: bool = True) -> bool:
+async def initiate_mission(ctx: Context, mission_points: list, return_to_launch: bool = True) -> dict:
     """
     Initiate a mission with a list of mission points. The drone must be armed.
 
+    Validates waypoints (non-empty, lat/lon bounds, finite altitude/speed caps) and
+    returns a structured status dict (fail-closed for agent use).
+
     Args:
         ctx (Context): The context of the request.
-        mission_points (list): A list of dictionaries representing mission points. Each dictionary must include:
-            - latitude_deg (float): Latitude in degrees (range: -90 to +90).
-            - longitude_deg (float): Longitude in degrees (range: -180 to +180).
-            - relative_altitude_m (float): Altitude relative to the takeoff altitude in meters.
-            - speed_m_s (float): Speed in meters per second.
-            - is_fly_through (bool): Whether to fly through the point or stop.
-            - gimbal_pitch_deg (float): Gimbal pitch angle in degrees (optional).
-            - gimbal_yaw_deg (float): Gimbal yaw angle in degrees (optional).
-            - camera_action (MissionItem.CameraAction): Camera action at the point (optional).
-            - loiter_time_s (float): Loiter time in seconds (optional).
-            - camera_photo_interval_s (float): Camera photo interval in seconds (optional).
-            - acceptance_radius_m (float): Acceptance radius in meters (optional).
-            - yaw_deg (float): Yaw angle in degrees (optional).
-            - camera_photo_distance_m (float): Camera photo distance in meters (optional).
-            - vehicle_action (MissionItem.VehicleAction): Vehicle action at the point (optional).
-        return_to_launch (bool): Whether to return to launch after completing the mission. Default is True.
+        mission_points (list): Waypoint dicts with latitude_deg, longitude_deg,
+            relative_altitude_m, speed_m_s, is_fly_through (+ optional MissionItem fields).
+        return_to_launch (bool): Whether to return to launch after completing the mission.
 
     Returns:
-        bool: True if the mission was successfully initiated.
+        dict: structured status (success with waypoint_count, or error).
     """
     drone = ctx.request_context.lifespan_context.drone
 
-    # Validate and construct mission items
-    mission_items = []
-    for point in mission_points:
-        try:
-            # Validate latitude and longitude ranges
-            if not (-90 <= point["latitude_deg"] <= 90):
-                raise ValueError(f"Invalid latitude_deg: {point['latitude_deg']}. Must be between -90 and 90.")
-            if not (-180 <= point["longitude_deg"] <= 180):
-                raise ValueError(f"Invalid longitude_deg: {point['longitude_deg']}. Must be between -180 and 180.")
+    try:
+        points = validate_mission_points(mission_points)
+    except ValueError as e:
+        logger.error("Mission validation failed: %s", e)
+        return tool_err(e)
 
-            mission_items.append(MissionItem(
-                latitude_deg=point["latitude_deg"],
-                longitude_deg=point["longitude_deg"],
-                relative_altitude_m=point["relative_altitude_m"],
-                speed_m_s=point["speed_m_s"],
-                is_fly_through=point["is_fly_through"],
-                gimbal_pitch_deg=point.get("gimbal_pitch_deg", float('nan')),
-                gimbal_yaw_deg=point.get("gimbal_yaw_deg", float('nan')),
-                camera_action=point.get("camera_action", MissionItem.CameraAction.NONE),
-                loiter_time_s=point.get("loiter_time_s", float('nan')),
-                camera_photo_interval_s=point.get("camera_photo_interval_s", float('nan')),
-                acceptance_radius_m=point.get("acceptance_radius_m", float('nan')),
-                yaw_deg=point.get("yaw_deg", float('nan')),
-                camera_photo_distance_m=point.get("camera_photo_distance_m", float('nan')),
-                vehicle_action=point.get("vehicle_action", MissionItem.VehicleAction.NONE)
-            ))
-        except KeyError as e:
-            raise ValueError(f"Missing required field in mission point: {e}")
+    mission_items = []
+    for point in points:
+        mission_items.append(MissionItem(
+            latitude_deg=point["latitude_deg"],
+            longitude_deg=point["longitude_deg"],
+            relative_altitude_m=point["relative_altitude_m"],
+            speed_m_s=point["speed_m_s"],
+            is_fly_through=point["is_fly_through"],
+            gimbal_pitch_deg=point.get("gimbal_pitch_deg", float('nan')),
+            gimbal_yaw_deg=point.get("gimbal_yaw_deg", float('nan')),
+            camera_action=point.get("camera_action", MissionItem.CameraAction.NONE),
+            loiter_time_s=point.get("loiter_time_s", float('nan')),
+            camera_photo_interval_s=point.get("camera_photo_interval_s", float('nan')),
+            acceptance_radius_m=point.get("acceptance_radius_m", float('nan')),
+            yaw_deg=point.get("yaw_deg", float('nan')),
+            camera_photo_distance_m=point.get("camera_photo_distance_m", float('nan')),
+            vehicle_action=point.get("vehicle_action", MissionItem.VehicleAction.NONE)
+        ))
 
     mission_plan = MissionPlan(mission_items)
 
-    # Set return-to-launch behavior
-    await drone.mission.set_return_to_launch_after_mission(return_to_launch)
+    try:
+        await drone.mission.set_return_to_launch_after_mission(return_to_launch)
+        logger.info("Uploading mission (%s waypoints)", len(mission_items))
+        await drone.mission.upload_mission(mission_plan)
+        logger.info("Starting mission")
+        await drone.mission.start_mission()
+        return tool_ok(waypoint_count=len(mission_items), return_to_launch=bool(return_to_launch))
+    except Exception as e:
+        logger.error("Mission upload/start failed: %s", e)
+        return tool_err(e)
 
-    logger.info("Uploading mission")
-    await drone.mission.upload_mission(mission_plan)
-
-    logger.info("Starting mission")
-    await drone.mission.start_mission()
-
-    return True
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> str:
