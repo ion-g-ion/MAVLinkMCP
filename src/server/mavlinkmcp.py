@@ -60,12 +60,24 @@ mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 
 # ARM
 @mcp.tool()
-async def arm_drone(ctx: Context) -> bool:
-    """Arm the drone."""
+async def arm_drone(ctx: Context) -> dict:
+    """Arm the drone.
+
+    Returns a structured result so agent clients never see an uncaught
+    exception as a bare transport error.
+
+    Returns:
+        dict: ``{"status": "success", "action": "arm"}`` or
+        ``{"status": "error", "action": "arm", "message": ...}``.
+    """
     drone = ctx.request_context.lifespan_context.drone
     logger.info("Arming")
-    await drone.action.arm()
-    return True
+    try:
+        await drone.action.arm()
+        return {"status": "success", "action": "arm"}
+    except Exception as e:
+        logger.error("Arm failed: %s", e)
+        return {"status": "error", "action": "arm", "message": str(e)}
 
 
 # Get Position
@@ -192,19 +204,24 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> bool:
     return True
 
 @mcp.tool()
-async def land(ctx: Context) -> bool:
+async def land(ctx: Context) -> dict:
     """Command the drone to initiate landing at its current location.
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        bool: True if the land command was initiated successfully.
+        dict: ``{"status": "success", "action": "land"}`` or
+        ``{"status": "error", "action": "land", "message": ...}``.
     """
     drone = ctx.request_context.lifespan_context.drone
     logger.info("Initiating landing")
-    await drone.action.land()
-    return True
+    try:
+        await drone.action.land()
+        return {"status": "success", "action": "land"}
+    except Exception as e:
+        logger.error("Land failed: %s", e)
+        return {"status": "error", "action": "land", "message": str(e)}
 
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
