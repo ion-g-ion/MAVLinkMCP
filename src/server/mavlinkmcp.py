@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from endpoint import build_system_address
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -18,6 +19,7 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
+
 
 @dataclass
 class MAVLinkConnector:
@@ -28,16 +30,15 @@ class MAVLinkConnector:
 async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
-    address = os.environ.get("MAVLINK_ADDRESS", "")
-    port = os.environ.get("MAVLINK_PORT", "14540")
+    system_address = build_system_address()
     drone = System()
-    logger.info("Connecting to drone at %s:%s", address, port)
-    await drone.connect(system_address=f"udp://{address}:{port}")
+    logger.info("Connecting to drone at %s", system_address)
+    await drone.connect(system_address=system_address)
 
-    logger.info("Waiting for drone to connect at %s:%s", address, port)
+    logger.info("Waiting for drone to connect at %s", system_address)
     async for state in drone.core.connection_state():
         if state.is_connected:
-            logger.info("Connected to drone at %s:%s!", address, port)
+            logger.info("Connected to drone at %s!", system_address)
             break
 
     logger.info("Waiting for drone to have a global position estimate...")
