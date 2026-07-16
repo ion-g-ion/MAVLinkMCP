@@ -55,6 +55,63 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
         await drone.close()
 
 # Pass lifespan to server
+
+def normalize_heading_deg(heading_deg: float) -> float:
+    """Normalize heading in degrees to the half-open interval [0, 360)."""
+    if heading_deg != heading_deg:  # NaN
+        raise ValueError("heading_deg must be finite")
+    if heading_deg in (float("inf"), float("-inf")):
+        raise ValueError("heading_deg must be finite")
+    h = float(heading_deg) % 360.0
+    # Python % can yield -0.0; force [0, 360)
+    if h < 0:
+        h += 360.0
+    return h if h < 360.0 else 0.0
+
+
+def format_battery(remaining_percent: float | None = None, remaining_fraction: float | None = None, voltage_v: float | None = None) -> dict:
+    """Build a battery dict from MAVSDK-like fields; reject nonsense remaining values when provided."""
+    out = {}
+    if remaining_fraction is not None:
+        rf = float(remaining_fraction)
+        if rf != rf or rf in (float("inf"), float("-inf")):
+            raise ValueError("remaining_fraction must be finite")
+        if not (0.0 <= rf <= 1.0):
+            raise ValueError("remaining_fraction must be between 0 and 1")
+        out["remaining_fraction"] = rf
+    if remaining_percent is not None:
+        rp = float(remaining_percent)
+        if rp != rp or rp in (float("inf"), float("-inf")):
+            raise ValueError("remaining_percent must be finite")
+        if not (0.0 <= rp <= 100.0):
+            raise ValueError("remaining_percent must be between 0 and 100")
+        out["remaining_percent"] = rp
+    if voltage_v is not None:
+        v = float(voltage_v)
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError("voltage_v must be finite")
+        if v < 0:
+            raise ValueError("voltage_v must be non-negative")
+        out["voltage_v"] = v
+    if not out:
+        raise ValueError("battery payload empty")
+    return out
+
+
+def tool_ok(payload=None):
+    out = {"status": "success"}
+    if payload is not None:
+        if isinstance(payload, dict):
+            out.update(payload)
+        else:
+            out["result"] = payload
+    return out
+
+
+def tool_err(message: str):
+    return {"status": "failed", "error": str(message)}
+
+
 mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 
 
@@ -351,6 +408,74 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     await drone.mission.start_mission()
 
     return True
+
+
+@mcp.tool()
+async def get_battery(ctx: Context) -> dict:
+    """Get a single battery telemetry sample (remaining fraction / voltage when available).
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: status + battery fields, or failed with error.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching battery")
+    try:
+        async for bat in drone.telemetry.battery():
+            remaining = getattr(bat, "remaining_percent", None)
+            voltage = getattr(bat, "voltage_v", None)
+            # MAVSDK uses 0-1 fractional remaining_percent historically on some versions
+            payload = {}
+            if remaining is not None:
+                r = float(remaining)
+                if 0.0 <= r <= 1.0:
+                    payload = format_battery(remaining_fraction=r, voltage_v=voltage)
+                else:
+                    payload = format_battery(remaining_percent=r, voltage_v=voltage)
+            elif voltage is not None:
+                payload = format_battery(voltage_v=voltage)
+            else:
+                return tool_err("battery sample empty")
+            return tool_ok({"battery": payload})
+    except Exception as e:
+        logger.error(f"Failed to retrieve battery: {e}")
+        return tool_err(e)
+
+
+@mcp.tool()
+async def get_heading(ctx: Context) -> dict:
+    """Get a single heading (degrees) sample from drone telemetry.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: status + heading_deg normalized to [0, 360), or failed with error.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching heading")
+    try:
+        # Prefer dedicated heading stream; fall back to attitude Euler yaw_deg
+        tele = drone.telemetry
+        if hasattr(tele, "heading"):
+            async for h in tele.heading():
+                deg = getattr(h, "heading_deg", None)
+                if deg is None:
+                    deg = getattr(h, "deg", None)
+                if deg is None:
+                    return tool_err("heading sample missing degrees")
+                return tool_ok({"heading_deg": normalize_heading_deg(float(deg))})
+        async for att in tele.attitude_euler():
+            yaw = getattr(att, "yaw_deg", None)
+            if yaw is None:
+                return tool_err("attitude sample missing yaw_deg")
+            return tool_ok({"heading_deg": normalize_heading_deg(float(yaw)), "source": "attitude_euler.yaw_deg"})
+    except Exception as e:
+        logger.error(f"Failed to retrieve heading: {e}")
+        return tool_err(e)
+
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> str:
