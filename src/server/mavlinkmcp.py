@@ -19,6 +19,10 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+
+from src.server.tool_dicts import tool_ok, tool_err
+
+
 @dataclass
 class MAVLinkConnector:
     drone: System
@@ -72,29 +76,31 @@ async def arm_drone(ctx: Context) -> bool:
 @mcp.tool()
 async def get_position(ctx: Context) -> dict:
     """
-    Get the position of the drone in latitude/longitude degrees and atittude in meters.
+    Get the position of the drone in latitude/longitude degrees and attitude in meters.
     The drone must be connected and have a global position estimate.
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: A dict with the position.
+        dict: A dict with the position (always a dict; fail-closed on error).
     """
     drone = ctx.request_context.lifespan_context.drone
     logger.info("Fetching drone position")
 
     try:
         async for position in drone.telemetry.position():
-            return {"status": "success", "position": {
-                "latitude_deg": position.latitude_deg,
-                "longitude_deg": position.longitude_deg,
-                "absolute_altitude_m": position.absolute_altitude_m,
-                "relative_altitude_m": position.relative_altitude_m
-            }}
+            return tool_ok({
+                "position": {
+                    "latitude_deg": position.latitude_deg,
+                    "longitude_deg": position.longitude_deg,
+                    "absolute_altitude_m": position.absolute_altitude_m,
+                    "relative_altitude_m": position.relative_altitude_m,
+                }
+            })
     except Exception as e:
         logger.error(f"Failed to retrieve position: {e}")
-        return str({"status": "failed"})
+        return tool_err(e)
 
 async def start_offboard_mode(connector: MAVLinkConnector) -> bool:
     """
