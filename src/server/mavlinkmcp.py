@@ -19,6 +19,8 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+from src.server.tool_dicts import format_gps_info, format_velocity_ned, tool_err, tool_ok
+
 @dataclass
 class MAVLinkConnector:
     drone: System
@@ -351,6 +353,49 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     await drone.mission.start_mission()
 
     return True
+
+
+@mcp.tool()
+async def get_velocity_ned(ctx: Context) -> dict:
+    """
+    Get NED velocity of the drone (north/east/down m/s). Fail-closed structured dict.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: success payload with velocity_ned or failed error.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching velocity NED")
+    try:
+        async for velocity in drone.telemetry.velocity_ned():
+            return tool_ok({"velocity_ned": format_velocity_ned(velocity)})
+    except Exception as e:
+        logger.error(f"Failed to retrieve velocity NED: {e}")
+        return tool_err(e)
+
+
+@mcp.tool()
+async def get_gps_info(ctx: Context) -> dict:
+    """
+    Get GPS satellite / fix info. Fail-closed structured dict.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: success payload with gps_info or failed error.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching GPS info")
+    try:
+        async for info in drone.telemetry.gps_info():
+            return tool_ok({"gps_info": format_gps_info(info)})
+    except Exception as e:
+        logger.error(f"Failed to retrieve GPS info: {e}")
+        return tool_err(e)
+
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> str:
