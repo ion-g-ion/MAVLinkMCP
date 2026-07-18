@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from server.status_helpers import normalize_mission_progress, normalize_status_text, status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -208,14 +209,18 @@ async def land(ctx: Context) -> bool:
 
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
-    """Print and return status text from the drone."""
+    """Print and return status text from the drone (always a structured dict)."""
     drone = ctx.request_context.lifespan_context.drone
     try:
         async for status_text in drone.telemetry.status_text():
             logger.info(f"Status: {status_text.type}: {status_text.text}")
-            return {"type": status_text.type, "text": status_text.text}  # Return a single dict
+            return normalize_status_text(status_text.type, status_text.text)
+        return status_err("no_status_text")
     except asyncio.CancelledError:
-        return {"message": "Failed to retrieve status text"}  # Return a failure message
+        return status_err("status_text_cancelled")
+    except Exception as exc:
+        logger.error("Failed to retrieve status text: %s", exc)
+        return status_err(exc)
 
 @mcp.tool()
 async def get_imu(ctx: Context, n: int = 1) -> list:
@@ -266,18 +271,25 @@ async def get_imu(ctx: Context, n: int = 1) -> list:
 @mcp.tool()
 async def print_mission_progress(ctx: Context) -> dict:
     """
-    Print and return the current mission progress of the drone.
+    Print and return the current mission progress of the drone (always a structured dict).
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: A dictionary containing the current and total mission progress.
+        dict: status plus current/total mission progress, or failed error.
     """
     drone = ctx.request_context.lifespan_context.drone
-    async for mission_progress in drone.mission.mission_progress():
-        logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
-        return {"current": mission_progress.current, "total": mission_progress.total}
+    try:
+        async for mission_progress in drone.mission.mission_progress():
+            logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
+            return normalize_mission_progress(mission_progress.current, mission_progress.total)
+        return status_err("no_mission_progress")
+    except asyncio.CancelledError:
+        return status_err("mission_progress_cancelled")
+    except Exception as exc:
+        logger.error("Failed to retrieve mission progress: %s", exc)
+        return status_err(exc)
 
 
 
