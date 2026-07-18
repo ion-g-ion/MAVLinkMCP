@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from server.move_sanitize import sanitize_relative_move
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -141,7 +142,7 @@ async def stop_offboard_mode(connector: MAVLinkConnector) -> bool:
         return False
 
 @mcp.tool()
-async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> bool:
+async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> dict:
     """
     Move the drone relative to the current position. The drone must be armed and offboard mode must be active.
 
@@ -153,26 +154,44 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
         yaw (float): yaw change.
 
     Returns:
-        bool: success flag.
+        dict: structured success or failed payload (never bare bool).
     """
+    ok, payload = sanitize_relative_move(lr, fb, altitude, yaw)
+    if not ok:
+        return payload  # type: ignore[return-value]
+
+    lr_f = payload["lr"]
+    fb_f = payload["fb"]
+    alt_f = payload["altitude"]
+    yaw_f = payload["yaw"]
+
     connector = ctx.request_context.lifespan_context
     drone = connector.drone
 
     # Activate offboard mode
     if not await start_offboard_mode(connector):
-        return False
+        return {"status": "failed", "error": "offboard_start_failed"}
 
     # Update the last offboard position
-    connector.last_offboard_position.north_m += fb
-    connector.last_offboard_position.east_m += lr
-    connector.last_offboard_position.down_m += -altitude
-    connector.last_offboard_position.yaw_deg += yaw
+    connector.last_offboard_position.north_m += fb_f
+    connector.last_offboard_position.east_m += lr_f
+    connector.last_offboard_position.down_m += -alt_f
+    connector.last_offboard_position.yaw_deg += yaw_f
 
     # Send the updated position
     logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
     await drone.offboard.set_position_ned(connector.last_offboard_position)
 
-    return True
+    pos = connector.last_offboard_position
+    return {
+        "status": "success",
+        "ned": {
+            "north_m": pos.north_m,
+            "east_m": pos.east_m,
+            "down_m": pos.down_m,
+            "yaw_deg": pos.yaw_deg,
+        },
+    }
 
 @mcp.tool()
 async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> bool:
