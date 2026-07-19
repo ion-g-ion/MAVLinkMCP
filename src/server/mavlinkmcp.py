@@ -11,6 +11,8 @@ import asyncio
 import os
 import logging
 
+from server.armed_air_helpers import normalize_in_air, normalize_is_armed, status_err as aa_status_err
+
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
 logger.setLevel(logging.INFO)
@@ -351,6 +353,34 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     await drone.mission.start_mission()
 
     return True
+
+
+
+@mcp.tool()
+async def get_is_armed(ctx: Context) -> dict:
+    """Return whether the vehicle reports armed=True (fail-closed dict)."""
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for armed in drone.telemetry.armed():
+            return normalize_is_armed(bool(armed))
+        return aa_status_err("no_armed_telemetry")
+    except Exception as e:
+        logger.error("Failed to retrieve armed state: %s", e)
+        return aa_status_err(str(e))
+
+
+@mcp.tool()
+async def get_in_air(ctx: Context) -> dict:
+    """Return whether the vehicle reports in_air=True (fail-closed dict)."""
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for in_air in drone.telemetry.in_air():
+            return normalize_in_air(bool(in_air))
+        return aa_status_err("no_in_air_telemetry")
+    except Exception as e:
+        logger.error("Failed to retrieve in_air state: %s", e)
+        return aa_status_err(str(e))
+
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> str:
