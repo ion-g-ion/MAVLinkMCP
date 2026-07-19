@@ -11,6 +11,8 @@ import asyncio
 import os
 import logging
 
+from server.home_position_helpers import normalize_home_position, status_err as home_status_err
+
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
 logger.setLevel(logging.INFO)
@@ -351,6 +353,29 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     await drone.mission.start_mission()
 
     return True
+
+
+
+@mcp.tool()
+async def get_home_position(ctx: Context) -> dict:
+    """
+    Return the vehicle home position as a fail-closed dict.
+
+    Uses mavsdk telemetry.home() when available.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for home in drone.telemetry.home():
+            return normalize_home_position(
+                home.latitude_deg,
+                home.longitude_deg,
+                home.absolute_altitude_m,
+            )
+        return home_status_err("no_home_telemetry")
+    except Exception as e:
+        logger.error("Failed to retrieve home position: %s", e)
+        return home_status_err(str(e))
+
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> str:
