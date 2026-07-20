@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from server.attitude_helpers import normalize_attitude_euler, status_err as attitude_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -371,6 +372,29 @@ async def get_flight_mode(ctx: Context) -> str:
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
         return "Unknown"
+
+
+
+@mcp.tool()
+async def get_attitude_euler(ctx: Context) -> dict:
+    """
+    Get the drone attitude as Euler angles (roll/pitch/yaw degrees).
+
+    Returns a structured dict for LLM/MCP clients. Non-finite samples fail closed.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching attitude_euler")
+    try:
+        async for att in drone.telemetry.attitude_euler():
+            return normalize_attitude_euler(
+                att.roll_deg,
+                att.pitch_deg,
+                att.yaw_deg,
+            )
+        return attitude_status_err("no attitude_euler samples")
+    except Exception as e:
+        logger.error("Failed to retrieve attitude_euler: %s", e)
+        return attitude_status_err(str(e))
 
 
 if __name__ == "__main__":
