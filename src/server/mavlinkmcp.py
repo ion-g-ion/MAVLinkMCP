@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from server.health_helpers import normalize_health_flags, status_err as health_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -371,6 +372,34 @@ async def get_flight_mode(ctx: Context) -> str:
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
         return "Unknown"
+
+
+
+@mcp.tool()
+async def get_health(ctx: Context) -> dict:
+    """
+    Get vehicle health / readiness flags (calibration, position, armable).
+
+    Structured dict for MCP agents. Missing stream fails closed.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching health telemetry")
+    try:
+        async for h in drone.telemetry.health():
+            flags = {
+                "is_gyrometer_calibration_ok": h.is_gyrometer_calibration_ok,
+                "is_accelerometer_calibration_ok": h.is_accelerometer_calibration_ok,
+                "is_magnetometer_calibration_ok": h.is_magnetometer_calibration_ok,
+                "is_local_position_ok": h.is_local_position_ok,
+                "is_global_position_ok": h.is_global_position_ok,
+                "is_home_position_ok": h.is_home_position_ok,
+                "is_armable": h.is_armable,
+            }
+            return normalize_health_flags(flags)
+        return health_status_err("no health samples")
+    except Exception as e:
+        logger.error("Failed to retrieve health: %s", e)
+        return health_status_err(str(e))
 
 
 if __name__ == "__main__":
