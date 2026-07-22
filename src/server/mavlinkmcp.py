@@ -7,6 +7,10 @@ from typing import Tuple
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.offboard import OffboardError, PositionNedYaw
+from src.server.distance_sensor_helpers import (
+    distance_sensor_status_err,
+    normalize_distance_sensor,
+)
 import asyncio
 import os
 import logging
@@ -371,6 +375,32 @@ async def get_flight_mode(ctx: Context) -> str:
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
         return "Unknown"
+
+
+@mcp.tool()
+async def get_distance_sensor(ctx: Context) -> dict:
+    """
+    Get rangefinder / distance sensor sample.
+
+    Structured fail-closed dict: current_distance_m required finite >= 0.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching distance_sensor telemetry")
+    try:
+        async for ds in drone.telemetry.distance_sensor():
+            fields = {
+                "minimum_distance_m": getattr(ds, "minimum_distance_m", None),
+                "maximum_distance_m": getattr(ds, "maximum_distance_m", None),
+                "current_distance_m": getattr(ds, "current_distance_m", None),
+            }
+            orientation = getattr(ds, "orientation", None)
+            if orientation is not None:
+                fields["orientation"] = orientation
+            return normalize_distance_sensor(fields)
+        return distance_sensor_status_err("no distance_sensor samples")
+    except Exception as e:
+        logger.error("Failed to retrieve distance_sensor: %s", e)
+        return distance_sensor_status_err(str(e))
 
 
 if __name__ == "__main__":
