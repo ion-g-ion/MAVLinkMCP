@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from src.server.odometry_helpers import normalize_odometry, odometry_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -371,6 +372,33 @@ async def get_flight_mode(ctx: Context) -> str:
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
         return "Unknown"
+
+
+
+
+@mcp.tool()
+async def get_odometry(ctx: Context) -> dict:
+    """
+    Get vehicle odometry sample (position_body required finite XYZ).
+
+    Structured fail-closed dict for agent/navigation consumers.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching odometry telemetry")
+    try:
+        async for odom in drone.telemetry.odometry():
+            fields = {
+                "position_body": getattr(odom, "position_body", None),
+                "velocity_body": getattr(odom, "velocity_body", None),
+            }
+            for key in ("frame_id", "child_frame_id"):
+                if hasattr(odom, key):
+                    fields[key] = getattr(odom, key)
+            return normalize_odometry(fields)
+        return odometry_status_err("no odometry samples")
+    except Exception as e:
+        logger.error("Failed to retrieve odometry: %s", e)
+        return odometry_status_err(str(e))
 
 
 if __name__ == "__main__":
