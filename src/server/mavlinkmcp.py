@@ -10,6 +10,7 @@ from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
+from src.server.wind_helpers import normalize_wind, wind_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -371,6 +372,41 @@ async def get_flight_mode(ctx: Context) -> str:
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
         return "Unknown"
+
+
+
+
+@mcp.tool()
+async def get_wind(ctx: Context) -> dict:
+    """
+    Get wind estimate (NED components when available).
+
+    Structured fail-closed dict; finite wind_*_ned_m_s required when present.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching wind telemetry")
+    try:
+        async for w in drone.telemetry.wind():
+            fields = {
+                "wind_x_ned_m_s": getattr(w, "wind_x_ned_m_s", None),
+                "wind_y_ned_m_s": getattr(w, "wind_y_ned_m_s", None),
+                "wind_z_ned_m_s": getattr(w, "wind_z_ned_m_s", None),
+            }
+            # Some mavsdk versions expose speed_horizontal / direction
+            for alt_src, alt_dst in (
+                ("speed_m_s", "speed_m_s"),
+                ("direction_deg", "direction_deg"),
+                ("wind_speed_m_s", "speed_m_s"),
+                ("direction_from_north_deg", "direction_deg"),
+            ):
+                if hasattr(w, alt_src) and getattr(w, alt_src) is not None:
+                    if alt_dst not in fields or fields.get(alt_dst) is None:
+                        fields[alt_dst] = getattr(w, alt_src)
+            return normalize_wind(fields)
+        return wind_status_err("no wind samples")
+    except Exception as e:
+        logger.error("Failed to retrieve wind: %s", e)
+        return wind_status_err(str(e))
 
 
 if __name__ == "__main__":
