@@ -29,6 +29,7 @@ from home_position_helpers import normalize_home_position, status_err as home_st
 from attitude_helpers import normalize_attitude_euler, status_err as attitude_status_err
 from health_helpers import normalize_health_flags, status_err as health_status_err
 from wind_helpers import normalize_wind, wind_status_err
+from odometry_helpers import normalize_odometry, odometry_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -996,6 +997,33 @@ async def get_wind(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve wind: %s", e)
         return wind_status_err(str(e))
+
+
+
+
+@mcp.tool()
+async def get_odometry(ctx: Context) -> dict:
+    """
+    Get vehicle odometry sample (position_body required finite XYZ).
+
+    Structured fail-closed dict for agent/navigation consumers.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching odometry telemetry")
+    try:
+        async for odom in drone.telemetry.odometry():
+            fields = {
+                "position_body": getattr(odom, "position_body", None),
+                "velocity_body": getattr(odom, "velocity_body", None),
+            }
+            for key in ("frame_id", "child_frame_id"):
+                if hasattr(odom, key):
+                    fields[key] = getattr(odom, key)
+            return normalize_odometry(fields)
+        return odometry_status_err("no odometry samples")
+    except Exception as e:
+        logger.error("Failed to retrieve odometry: %s", e)
+        return odometry_status_err(str(e))
 
 
 if __name__ == "__main__":
