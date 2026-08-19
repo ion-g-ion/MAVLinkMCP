@@ -129,6 +129,20 @@ def validate_mission_points(
         cleaned["is_fly_through"] = bool(point["is_fly_through"])
         validated.append(cleaned)
     return validated
+def clamp_imu_count(n, min_n: int = 1, max_n: int = 100) -> int:
+    """Clamp requested IMU sample count to a safe inclusive range."""
+    try:
+        # bool is int subclass; reject explicitly for agent clarity
+        if isinstance(n, bool):
+            raise ValueError("n must be an integer count, not bool")
+        v = int(n)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"imu count must be an integer: {e}") from e
+    if v < min_n:
+        return min_n
+    if v > max_n:
+        return max_n
+    return v
 
 
 @dataclass
@@ -188,7 +202,7 @@ async def arm_drone(ctx: Context) -> dict:
 @mcp.tool()
 async def get_position(ctx: Context) -> dict:
     """
-    Get the position of the drone in latitude/longitude degrees and atittude in meters.
+    Get the position of the drone in latitude/longitude degrees and altitude in meters.
     The drone must be connected and have a global position estimate.
 
     Args:
@@ -355,76 +369,95 @@ async def land(ctx: Context) -> dict:
 
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
-    """Print and return status text from the drone."""
+    """Print and return status text from the drone (structured status on failure)."""
     drone = ctx.request_context.lifespan_context.drone
     try:
         async for status_text in drone.telemetry.status_text():
             logger.info(f"Status: {status_text.type}: {status_text.text}")
-            return {"type": status_text.type, "text": status_text.text}  # Return a single dict
+            return tool_ok(type=str(status_text.type), text=status_text.text)
+        return tool_err("no status text available")
     except asyncio.CancelledError:
-        return {"message": "Failed to retrieve status text"}  # Return a failure message
+        return tool_err("status text stream cancelled")
+    except Exception as e:
+        logger.error("status text failed: %s", e)
+        return tool_err(e)
+
 
 @mcp.tool()
-async def get_imu(ctx: Context, n: int = 1) -> list:
+async def get_imu(ctx: Context, n: int = 1) -> dict:
     """Fetch the first n IMU data points from the drone.
 
     Args:
         ctx (Context): The context of the request.
-        n (int): The number of IMU data points to fetch. Default is 1.
+        n (int): Number of IMU samples (clamped to [1, 100] for fail-closed agent use).
 
     Returns:
-        list: A list of dictionaries containing IMU data points.
+        dict: structured status with imu list and count, or error.
     """
     drone = ctx.request_context.lifespan_context.drone
     telemetry = drone.telemetry
 
-    # Set the rate at which IMU data is updated (in Hz)
-    await telemetry.set_rate_imu(200.0)
+    try:
+        count_target = clamp_imu_count(n)
+    except ValueError as e:
+        logger.error("Invalid IMU count: %s", e)
+        return tool_err(e)
 
-    imu_data = []
-    count = 0
+    try:
+        # Set the rate at which IMU data is updated (in Hz)
+        await telemetry.set_rate_imu(200.0)
 
-    async for imu in telemetry.imu():
-        imu_data.append({
-            "timestamp_us": imu.timestamp_us,
-            "acceleration": {
-                "x": imu.acceleration_frd.forward_m_s2,
-                "y": imu.acceleration_frd.right_m_s2,
-                "z": imu.acceleration_frd.down_m_s2
-            },
-            "angular_velocity": {
-                "x": imu.angular_velocity_frd.forward_rad_s,
-                "y": imu.angular_velocity_frd.right_rad_s,
-                "z": imu.angular_velocity_frd.down_rad_s
-            },
-            "magnetic_field": {
-                "x": imu.magnetic_field_frd.forward_gauss,
-                "y": imu.magnetic_field_frd.right_gauss,
-                "z": imu.magnetic_field_frd.down_gauss
-            },
-            "temperature_degc": imu.temperature_degc
-        })
-        count += 1
-        if count >= n:
-            break
+        imu_data = []
+        count = 0
 
-    return imu_data
+        async for imu in telemetry.imu():
+            imu_data.append({
+                "timestamp_us": imu.timestamp_us,
+                "acceleration": {
+                    "x": imu.acceleration_frd.forward_m_s2,
+                    "y": imu.acceleration_frd.right_m_s2,
+                    "z": imu.acceleration_frd.down_m_s2
+                },
+                "angular_velocity": {
+                    "x": imu.angular_velocity_frd.forward_rad_s,
+                    "y": imu.angular_velocity_frd.right_rad_s,
+                    "z": imu.angular_velocity_frd.down_rad_s
+                },
+                "magnetic_field": {
+                    "x": imu.magnetic_field_frd.forward_gauss,
+                    "y": imu.magnetic_field_frd.right_gauss,
+                    "z": imu.magnetic_field_frd.down_gauss
+                },
+                "temperature_degc": imu.temperature_degc
+            })
+            count += 1
+            if count >= count_target:
+                break
+
+        return tool_ok(imu=imu_data, count=len(imu_data))
+    except Exception as e:
+        logger.error("IMU fetch failed: %s", e)
+        return tool_err(e)
+
 
 @mcp.tool()
 async def print_mission_progress(ctx: Context) -> dict:
     """
     Print and return the current mission progress of the drone.
 
-    Args:
-        ctx (Context): The context of the request.
-
     Returns:
-        dict: A dictionary containing the current and total mission progress.
+        dict: structured status with current/total, or error.
     """
     drone = ctx.request_context.lifespan_context.drone
-    async for mission_progress in drone.mission.mission_progress():
-        logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
-        return {"current": mission_progress.current, "total": mission_progress.total}
+    try:
+        async for mission_progress in drone.mission.mission_progress():
+            logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
+            return tool_ok(current=mission_progress.current, total=mission_progress.total)
+        return tool_err("no mission progress available")
+    except Exception as e:
+        logger.error("mission progress failed: %s", e)
+        return tool_err(e)
+
 
 
 
@@ -487,24 +520,25 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
 
 
 @mcp.tool()
-async def get_flight_mode(ctx: Context) -> str:
+async def get_flight_mode(ctx: Context) -> dict:
     """
     Get the current flight mode of the drone.
 
-    Args:
-        ctx (Context): The context of the request.
-
     Returns:
-        str: The current flight mode of the drone.
+        dict: structured status with mode string, or error.
     """
     drone = ctx.request_context.lifespan_context.drone
     try:
         flight_mode = await drone.telemetry.flight_mode().__anext__()
         logger.info(f"FlightMode: {flight_mode}")
-        return str(flight_mode)
+        return tool_ok(mode=str(flight_mode))
     except StopAsyncIteration:
         logger.error("Failed to retrieve flight mode")
-        return "Unknown"
+        return tool_err("no flight mode available", mode="Unknown")
+    except Exception as e:
+        logger.error("flight mode failed: %s", e)
+        return tool_err(e)
+
 
 
 if __name__ == "__main__":
