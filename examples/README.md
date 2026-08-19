@@ -41,7 +41,7 @@ default_model: gpt-4o-mini  # Change this if you want to use another model
 
 ## Running the Example
 
-You can run the example agent script using either of the following commands from the project root:
+You can run the example agent script using either of the following commands from the **repository root** (the script lives at `examples/example_agent.py`, not the repo root):
 
 ```sh
 python examples/example_agent.py
@@ -50,6 +50,8 @@ or
 ```sh
 uv run examples/example_agent.py
 ```
+
+Start the MCP server separately (or via your FastAgent server config) with `python src/server/mavlinkmcp.py`. For PX4 SITL, the server defaults to UDP port **14540** (`MAVLINK_PORT`).
 
 Make sure all dependencies are installed and your environment is properly configured.
 
