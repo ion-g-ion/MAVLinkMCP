@@ -181,6 +181,23 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
         await drone.close()
 
 # Pass lifespan to server
+
+def tool_ok(payload=None):
+    """Structured success payload for MCP tool clients."""
+    out = {"status": "success"}
+    if payload is not None:
+        if isinstance(payload, dict):
+            out.update(payload)
+        else:
+            out["result"] = payload
+    return out
+
+
+def tool_err(message: str):
+    """Structured failure payload for MCP tool clients."""
+    return {"status": "failed", "error": str(message)}
+
+
 mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 
 
@@ -516,6 +533,47 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
         return tool_ok(waypoint_count=len(mission_items), return_to_launch=bool(return_to_launch))
     except Exception as e:
         logger.error("Mission upload/start failed: %s", e)
+        return tool_err(e)
+
+
+
+@mcp.tool()
+async def disarm_drone(ctx: Context) -> dict:
+    """Disarm the drone when it is safe to do so (typically on ground).
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: status success or failed with error message.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Disarming")
+    try:
+        await drone.action.disarm()
+        return tool_ok({"disarmed": True})
+    except Exception as e:
+        logger.error(f"Disarm failed: {e}")
+        return tool_err(e)
+
+
+@mcp.tool()
+async def return_to_launch(ctx: Context) -> dict:
+    """Command the drone to return to launch (RTL).
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: status success or failed with error message.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Return to launch")
+    try:
+        await drone.action.return_to_launch()
+        return tool_ok({"rtl": True})
+    except Exception as e:
+        logger.error(f"RTL failed: {e}")
         return tool_err(e)
 
 
