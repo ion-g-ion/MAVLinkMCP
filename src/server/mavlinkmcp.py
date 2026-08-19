@@ -8,6 +8,7 @@ from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.offboard import OffboardError, PositionNedYaw
 from rc_status_helpers import normalize_rc_status, rc_status_err
+from altitude_helpers import altitude_status_err, normalize_altitude
 import asyncio
 import os
 import logging
@@ -881,6 +882,32 @@ async def get_rc_status(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve rc_status: %s", e)
         return rc_status_err(str(e))
+
+
+
+
+@mcp.tool()
+async def get_altitude(ctx: Context) -> dict:
+    """
+    Get altitude telemetry (AMSL, relative, optional local/terrain).
+
+    Structured dict for MCP agents. Core AMSL/relative must be finite.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching altitude telemetry")
+    try:
+        async for alt in drone.telemetry.altitude():
+            fields = {
+                "altitude_amsl_m": alt.altitude_amsl_m,
+                "altitude_local_m": alt.altitude_local_m,
+                "altitude_relative_m": alt.altitude_relative_m,
+                "altitude_terrain_m": alt.altitude_terrain_m,
+            }
+            return normalize_altitude(fields)
+        return altitude_status_err("no altitude samples")
+    except Exception as e:
+        logger.error("Failed to retrieve altitude: %s", e)
+        return altitude_status_err(str(e))
 
 
 if __name__ == "__main__":
