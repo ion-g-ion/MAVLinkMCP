@@ -30,6 +30,10 @@ from attitude_helpers import normalize_attitude_euler, status_err as attitude_st
 from health_helpers import normalize_health_flags, status_err as health_status_err
 from wind_helpers import normalize_wind, wind_status_err
 from odometry_helpers import normalize_odometry, odometry_status_err
+from unix_epoch_time_helpers import (
+    normalize_unix_epoch_time,
+    unix_epoch_time_status_err,
+)
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -1024,6 +1028,25 @@ async def get_odometry(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve odometry: %s", e)
         return odometry_status_err(str(e))
+
+
+
+@mcp.tool()
+async def get_unix_epoch_time(ctx: Context) -> dict:
+    """Get vehicle unix epoch time as a fail-closed dictionary.
+
+    Returns:
+        dict: {"status": "success", "unix_epoch_time": {"unix_epoch_s": float}}
+              or {"status": "failed", "error": str}
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for sample in drone.telemetry.unix_epoch_time():
+            return normalize_unix_epoch_time(sample)
+        return unix_epoch_time_status_err("no unix_epoch_time samples")
+    except Exception as e:
+        logger.error(f"Failed to retrieve unix_epoch_time: {e}")
+        return unix_epoch_time_status_err(str(e))
 
 
 if __name__ == "__main__":
