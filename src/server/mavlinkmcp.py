@@ -15,6 +15,8 @@ from tool_dicts import format_gps_info, format_velocity_ned
 
 from armed_air_helpers import normalize_in_air, normalize_is_armed, status_err as aa_status_err
 
+from home_position_helpers import normalize_home_position, status_err as home_status_err
+
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
 logger.setLevel(logging.INFO)
@@ -580,6 +582,29 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
 
 
 
+
+
+
+
+@mcp.tool()
+async def get_home_position(ctx: Context) -> dict:
+    """
+    Return the vehicle home position as a fail-closed dict.
+
+    Uses mavsdk telemetry.home() when available.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for home in drone.telemetry.home():
+            return normalize_home_position(
+                home.latitude_deg,
+                home.longitude_deg,
+                home.absolute_altitude_m,
+            )
+        return home_status_err("no_home_telemetry")
+    except Exception as e:
+        logger.error("Failed to retrieve home position: %s", e)
+        return home_status_err(str(e))
 
 
 @mcp.tool()
