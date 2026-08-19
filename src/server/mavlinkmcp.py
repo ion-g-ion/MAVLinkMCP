@@ -9,6 +9,10 @@ from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.offboard import OffboardError, PositionNedYaw
 from rc_status_helpers import normalize_rc_status, rc_status_err
 from altitude_helpers import altitude_status_err, normalize_altitude
+from landed_state_helpers import (
+    landed_state_status_err,
+    normalize_landed_state,
+)
 import asyncio
 import os
 import logging
@@ -908,6 +912,24 @@ async def get_altitude(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve altitude: %s", e)
         return altitude_status_err(str(e))
+
+
+@mcp.tool()
+async def get_landed_state(ctx: Context) -> dict:
+    """
+    Get landed state telemetry (ON_GROUND / IN_AIR / TAKING_OFF / LANDING / UNKNOWN).
+
+    Structured fail-closed dict for MCP agents (gates arm / takeoff / land).
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching landed_state telemetry")
+    try:
+        async for state in drone.telemetry.landed_state():
+            return normalize_landed_state(state)
+        return landed_state_status_err("no landed_state samples")
+    except Exception as e:
+        logger.error("Failed to retrieve landed_state: %s", e)
+        return landed_state_status_err(str(e))
 
 
 if __name__ == "__main__":
