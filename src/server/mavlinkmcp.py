@@ -51,12 +51,24 @@ def validate_relative_move(lr: float, fb: float, altitude: float, yaw: float, ma
             raise ValueError(f"{name} magnitude {abs(v)} exceeds max_abs_m={max_abs_m}")
 
 
-def tool_ok(**payload):
-    return {"status": "success", **payload}
+def tool_ok(payload=None, **extra):
+    """Structured success payload for MCP tool clients.
+
+    Accepts either a positional dict (``tool_ok({"disarmed": True})``) or
+    keyword fields (``tool_ok(armed=True)``); both merge into the result.
+    """
+    out = {"status": "success"}
+    if isinstance(payload, dict):
+        out.update(payload)
+    elif payload is not None:
+        out["result"] = payload
+    out.update(extra)
+    return out
 
 
 def tool_err(message, **payload):
-    return {"status": "error", "message": str(message), **payload}
+    """Structured failure payload for MCP tool clients (fail-closed)."""
+    return {"status": "failed", "error": str(message), **payload}
 
 
 def validate_mission_points(
@@ -181,22 +193,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
         await drone.close()
 
 # Pass lifespan to server
-
-def tool_ok(payload=None):
-    """Structured success payload for MCP tool clients."""
-    out = {"status": "success"}
-    if payload is not None:
-        if isinstance(payload, dict):
-            out.update(payload)
-        else:
-            out["result"] = payload
-    return out
-
-
-def tool_err(message: str):
-    """Structured failure payload for MCP tool clients."""
-    return {"status": "failed", "error": str(message)}
-
 
 mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 

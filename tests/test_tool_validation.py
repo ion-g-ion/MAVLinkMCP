@@ -143,9 +143,11 @@ class TestToolShapes(unittest.TestCase):
 
     def test_ok_err(self):
         self.assertEqual(self.m.tool_ok(x=1)["status"], "success")
+        # positional-dict form (used by disarm_drone / return_to_launch)
+        self.assertEqual(self.m.tool_ok({"disarmed": True})["disarmed"], True)
         err = self.m.tool_err("nope")
-        self.assertEqual(err["status"], "error")
-        self.assertIn("nope", err["message"])
+        self.assertEqual(err["status"], "failed")
+        self.assertIn("nope", err["error"])
 
 
 if __name__ == "__main__":
