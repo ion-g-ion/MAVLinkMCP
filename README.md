@@ -72,6 +72,19 @@ Export your LLM provider key as documented under `examples/` (never commit secre
 
 MCP tools can arm, take off, and move a vehicle. Prefer SITL. Keep a human ready to kill switch / land. Tool failures should be treated as fail-closed by the client.
 
+## Tests
+
+The unit tests are offline — they exercise the pure validation/normalization
+helpers and do not import `mavsdk` or talk to a vehicle. Run them from the
+repository root:
+
+```bash
+python -m unittest discover
+```
+
+`tests/__init__.py` puts `src/server` on `sys.path` so the tests import the
+helper modules exactly the way the server does when launched as a script.
+
 ## Contributing
 
 Contributions are welcome! Please fork the repository and submit a pull request.
