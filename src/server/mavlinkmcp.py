@@ -34,6 +34,10 @@ from unix_epoch_time_helpers import (
     normalize_unix_epoch_time,
     unix_epoch_time_status_err,
 )
+from vtol_state_helpers import (
+    normalize_vtol_state,
+    vtol_state_status_err,
+)
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -1047,6 +1051,24 @@ async def get_unix_epoch_time(ctx: Context) -> dict:
     except Exception as e:
         logger.error(f"Failed to retrieve unix_epoch_time: {e}")
         return unix_epoch_time_status_err(str(e))
+
+
+
+@mcp.tool()
+async def get_vtol_state(ctx: Context) -> dict:
+    """Get VTOL state (UNDEFINED/TRANSITION_TO_FW/TRANSITION_TO_MC/MC/FW). Fail-closed dict.
+
+    Returns:
+        dict: {"status": "success", "vtol_state": str} or {"status": "failed", "error": str}
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    try:
+        async for state in drone.telemetry.vtol_state():
+            return normalize_vtol_state(state)
+        return vtol_state_status_err("no vtol_state samples")
+    except Exception as e:
+        logger.error(f"Failed to retrieve vtol_state: {e}")
+        return vtol_state_status_err(str(e))
 
 
 if __name__ == "__main__":
