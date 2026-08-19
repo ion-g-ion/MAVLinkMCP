@@ -13,6 +13,10 @@ from landed_state_helpers import (
     landed_state_status_err,
     normalize_landed_state,
 )
+from distance_sensor_helpers import (
+    distance_sensor_status_err,
+    normalize_distance_sensor,
+)
 import asyncio
 import os
 import logging
@@ -930,6 +934,32 @@ async def get_landed_state(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve landed_state: %s", e)
         return landed_state_status_err(str(e))
+
+
+@mcp.tool()
+async def get_distance_sensor(ctx: Context) -> dict:
+    """
+    Get rangefinder / distance sensor sample.
+
+    Structured fail-closed dict: current_distance_m required finite >= 0.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching distance_sensor telemetry")
+    try:
+        async for ds in drone.telemetry.distance_sensor():
+            fields = {
+                "minimum_distance_m": getattr(ds, "minimum_distance_m", None),
+                "maximum_distance_m": getattr(ds, "maximum_distance_m", None),
+                "current_distance_m": getattr(ds, "current_distance_m", None),
+            }
+            orientation = getattr(ds, "orientation", None)
+            if orientation is not None:
+                fields["orientation"] = orientation
+            return normalize_distance_sensor(fields)
+        return distance_sensor_status_err("no distance_sensor samples")
+    except Exception as e:
+        logger.error("Failed to retrieve distance_sensor: %s", e)
+        return distance_sensor_status_err(str(e))
 
 
 if __name__ == "__main__":
