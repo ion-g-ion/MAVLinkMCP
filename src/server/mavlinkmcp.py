@@ -16,6 +16,7 @@ from tool_dicts import format_gps_info, format_velocity_ned
 from armed_air_helpers import normalize_in_air, normalize_is_armed, status_err as aa_status_err
 
 from home_position_helpers import normalize_home_position, status_err as home_status_err
+from attitude_helpers import normalize_attitude_euler, status_err as attitude_status_err
 
 # Configure logger
 logger = logging.getLogger("MAVLinkMCP")
@@ -802,6 +803,29 @@ async def get_flight_mode(ctx: Context) -> dict:
         logger.error("flight mode failed: %s", e)
         return tool_err(e)
 
+
+
+
+@mcp.tool()
+async def get_attitude_euler(ctx: Context) -> dict:
+    """
+    Get the drone attitude as Euler angles (roll/pitch/yaw degrees).
+
+    Returns a structured dict for LLM/MCP clients. Non-finite samples fail closed.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching attitude_euler")
+    try:
+        async for att in drone.telemetry.attitude_euler():
+            return normalize_attitude_euler(
+                att.roll_deg,
+                att.pitch_deg,
+                att.yaw_deg,
+            )
+        return attitude_status_err("no attitude_euler samples")
+    except Exception as e:
+        logger.error("Failed to retrieve attitude_euler: %s", e)
+        return attitude_status_err(str(e))
 
 
 if __name__ == "__main__":
