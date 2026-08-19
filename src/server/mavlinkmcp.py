@@ -7,6 +7,7 @@ from typing import Tuple
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.offboard import OffboardError, PositionNedYaw
+from rc_status_helpers import normalize_rc_status, rc_status_err
 import asyncio
 import os
 import logging
@@ -855,6 +856,31 @@ async def get_health(ctx: Context) -> dict:
     except Exception as e:
         logger.error("Failed to retrieve health: %s", e)
         return health_status_err(str(e))
+
+
+
+
+@mcp.tool()
+async def get_rc_status(ctx: Context) -> dict:
+    """
+    Get RC link status (availability + signal strength percent).
+
+    Structured dict for MCP agents. Missing stream fails closed.
+    """
+    drone = ctx.request_context.lifespan_context.drone
+    logger.info("Fetching RC status telemetry")
+    try:
+        async for rc in drone.telemetry.rc_status():
+            flags = {
+                "was_available_once": rc.was_available_once,
+                "is_available": rc.is_available,
+                "signal_strength_percent": rc.signal_strength_percent,
+            }
+            return normalize_rc_status(flags)
+        return rc_status_err("no rc_status samples")
+    except Exception as e:
+        logger.error("Failed to retrieve rc_status: %s", e)
+        return rc_status_err(str(e))
 
 
 if __name__ == "__main__":
