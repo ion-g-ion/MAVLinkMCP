@@ -2,16 +2,16 @@
 import sys
 import types
 import unittest
-import importlib.util
+import importlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_helpers():
-    """Import mavlinkmcp with lightweight stubs when mcp/mavsdk are absent."""
+    """Import the server module, with lightweight stubs when mcp/mavsdk are absent."""
     try:
-        import mavlinkmcp as m  # type: ignore
+        import mavlinkmcp.server as m  # type: ignore
 
         return m
     except Exception:
@@ -88,15 +88,10 @@ def _load_helpers():
     off.OffboardError = OffboardError
     off.PositionNedYaw = PositionNedYaw
 
-    spec = importlib.util.spec_from_file_location(
-        "mavlinkmcp", ROOT / "src" / "server" / "mavlinkmcp.py"
-    )
-    m = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    # Ensure "src/server" name not required
-    sys.modules["mavlinkmcp"] = m
-    spec.loader.exec_module(m)
-    return m
+    # Import the real package module so its relative imports resolve, forcing a
+    # fresh execution against the stubs installed above.
+    sys.modules.pop("mavlinkmcp.server", None)
+    return importlib.import_module("mavlinkmcp.server")
 
 
 class TestClampTakeoff(unittest.TestCase):

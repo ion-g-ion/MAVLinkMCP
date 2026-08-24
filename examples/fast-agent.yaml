@@ -5,12 +5,15 @@
 # Takes format:
 #   <provider>.<model_string>.<reasoning_effort?> (e.g. anthropic.claude-3-5-sonnet-20241022 or openai.o3-mini.low)
 # Accepts aliases for Anthropic Models: haiku, haiku3, sonnet, sonnet35, opus, opus3
-# and OpenAI Models: gpt-4o-mini, gpt-4o, o1, o1-mini, o3-mini
+# OpenAI Models: gpt-4o-mini, gpt-4o, o1, o1-mini, o3-mini
+# Google Models: gemini (-> gemini-3.1-pro-preview), gemini2, gemini25, gemini25pro,
+#   gemini3, gemini3flash, gemini35 -- or a full name such as gemini-2.5-flash.
+#   Google models need `google.api_key` in fast-agent.secrets.yaml (env: GOOGLE_API_KEY).
 #
 # If not specified, defaults to "haiku". 
 # Can be overriden with a command line switch --model=<model>, or within the Agent constructor.
 
-default_model: gpt-4o-mini
+default_model: gemini-2.5-flash
 
 # Logging and Console Configuration:
 logger:
@@ -33,5 +36,11 @@ logger:
 mcp:
     servers:
         mavlink_mcp:
-            command: "python"
-            args: ["src/server/mavlinkmcp.py"]
+            # `mavlinkmcp` is the console script installed by `uv sync` / `pip install -e .`.
+            # This bare form needs the project venv on PATH. If your client launches the
+            # server from an arbitrary working directory (most chat apps do), give it the
+            # absolute path instead and drop the PATH dependency entirely:
+            #   command: "/abs/path/to/MAVLinkMCP/.venv/bin/mavlinkmcp"
+            #   args: []
+            command: "mavlinkmcp"
+            args: []

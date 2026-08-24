@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 
 fastagent.secrets.yaml
+fast-agent.secrets.yaml

@@ -8,7 +8,11 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.10"
 mavsdk = "*"
-mcp-agent = "*"
+# mcp 2.x removed mcp.server.fastmcp (FastMCP/Context); the server imports it directly.
+mcp = ">=1.6,<2"
+# FastAgent ships in `fast-agent-mcp` (import: `fast_agent`), NOT in LastMile's
+# similarly-named `mcp-agent`, which has no FastAgent at all.
+fast-agent-mcp = "*"
 mcp-server = "*"
 
 [project]
@@ -19,10 +23,22 @@ authors = [{name = "Ion Gabriel", email = "ion.ion.gabriel@gmail.com"}]
 license = {text = "MIT"}
 dependencies = [
     "mavsdk",
-    "mcp-agent",
+    # mcp 2.x removed mcp.server.fastmcp (FastMCP/Context); the server imports it directly.
+    "mcp>=1.6,<2",
+    # FastAgent ships in `fast-agent-mcp` (import: `fast_agent`), NOT in LastMile's
+    # similarly-named `mcp-agent`, which has no FastAgent at all.
+    "fast-agent-mcp",
     "mcp-server"
 ]
 requires-python = ">=3.10"
+
+[project.scripts]
+# Absolute path to this script (<venv>/bin/mavlinkmcp) is cwd-independent —
+# use it in MCP client configs instead of `python path/to/server.py`.
+mavlinkmcp = "mavlinkmcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [build-system]
 requires = ["setuptools", "wheel"]

@@ -1,6 +1,6 @@
 import math
 import unittest
-from home_position_helpers import normalize_home_position, status_err
+from mavlinkmcp.home_position_helpers import normalize_home_position, status_err
 
 
 class TestHomePositionHelpers(unittest.TestCase):

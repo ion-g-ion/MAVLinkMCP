@@ -1,5 +1,5 @@
 import unittest
-from armed_air_helpers import normalize_in_air, normalize_is_armed, status_err
+from mavlinkmcp.armed_air_helpers import normalize_in_air, normalize_is_armed, status_err
 
 
 class TestArmedAirHelpers(unittest.TestCase):

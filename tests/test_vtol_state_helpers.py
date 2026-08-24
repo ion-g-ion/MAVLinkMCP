@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from vtol_state_helpers import (
+from mavlinkmcp.vtol_state_helpers import (
     KNOWN_STATES,
     normalize_vtol_state,
     vtol_state_status_err,

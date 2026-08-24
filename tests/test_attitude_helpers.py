@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from attitude_helpers import normalize_attitude_euler, status_err
+from mavlinkmcp.attitude_helpers import normalize_attitude_euler, status_err
 
 
 class TestAttitudeHelpers(unittest.TestCase):

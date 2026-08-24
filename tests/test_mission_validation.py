@@ -2,7 +2,7 @@
 import sys
 import types
 import unittest
-import importlib.util
+import importlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,18 +81,10 @@ def _load_module():
     off.PositionNedYaw = PositionNedYaw
 
     # Avoid double-load pollution
-    mod_name = "mavlinkmcp_mission_under_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-
-    spec = importlib.util.spec_from_file_location(
-        mod_name, ROOT / "src" / "server" / "mavlinkmcp.py"
-    )
-    m = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[mod_name] = m
-    spec.loader.exec_module(m)
-    return m
+    # Import the real package module so its relative imports resolve, forcing a
+    # fresh execution against the stubs installed above.
+    sys.modules.pop("mavlinkmcp.server", None)
+    return importlib.import_module("mavlinkmcp.server")
 
 
 def _good_point(**overrides):

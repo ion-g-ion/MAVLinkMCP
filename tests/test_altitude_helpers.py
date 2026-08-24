@@ -1,6 +1,6 @@
 import unittest
 
-from altitude_helpers import altitude_status_err, normalize_altitude
+from mavlinkmcp.altitude_helpers import altitude_status_err, normalize_altitude
 
 
 class TestAltitudeHelpers(unittest.TestCase):

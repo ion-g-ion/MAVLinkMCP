@@ -14,7 +14,7 @@ See [mavsdk.mavlink.io](https://mavsdk.mavlink.io/main/en/) for details.
 
 ## Prerequisites
 
-Before running the example, you must create a `fastagent.secrets.yaml` file in the `examples/` directory with your API keys.  
+Before running the example, you must create a `fast-agent.secrets.yaml` file in the `examples/` directory with your API keys.  
 **Note:** The YAML below is just an example—include only the keys you actually use.
 
 ```yaml
@@ -22,6 +22,8 @@ openai:
     api_key: <your-api-key>
 anthropic:
     api_key: <your-api-key-here>
+google:
+    api_key: <your-api-key-here>   # required for Gemini models
 ```
 
 Replace `<your-api-key>` and `<your-api-key-here>` with your actual API keys.
@@ -30,13 +32,40 @@ Replace `<your-api-key>` and `<your-api-key-here>` with your actual API keys.
 
 ## Model Configuration
 
-The model is set in `fastagent.config.yaml`.  
-By default, this setup uses the OpenAI model (`gpt-4o-mini`).  
+The model is set in `fast-agent.yaml`.  
+By default, this setup uses `gemini-2.5-flash`.  
 If you want to use a different model or provider, change the `default_model` field in the config file accordingly.
 
-Example (`fastagent.config.yaml`):
+Example (`fast-agent.yaml`):
 ```yaml
-default_model: gpt-4o-mini  # Change this if you want to use another model
+default_model: gemini-2.5-flash  # Change this if you want to use another model
+```
+
+You can use either a short alias or a full model name. The aliases accepted by the
+installed version of `fast-agent-mcp` are:
+
+| Alias | Resolves to |
+|---|---|
+| `gemini` | `gemini-3.1-pro-preview` |
+| `gemini2` | `gemini-2.0-flash` |
+| `gemini25` | `gemini-2.5-flash` |
+| `gemini25pro` | `gemini-2.5-pro` |
+| `gemini3` | `gemini-3-pro-preview` |
+| `gemini3flash` | `gemini-3-flash-preview` |
+| `gemini3.1` / `gemini31pro` | `gemini-3.1-pro-preview` |
+| `gemini3.1flashlite` | `gemini-3.1-flash-lite-preview` |
+| `gemini35` / `gemini35flash` | `gemini-3.5-flash` |
+
+Full names work too (`gemini-2.5-flash`, `gemini-3-pro-preview`, …), and you can force
+the provider with a prefix: `google.gemini-2.5-flash` uses the native Google API, while
+`googleoai.gemini-2.5-flash` goes through Google's OpenAI-compatible endpoint.
+
+Unknown names are rejected at startup with `Unknown model or provider`, so a typo such as
+`gemini-3.7-flash` fails immediately rather than at the first request. To list what your
+installed version accepts:
+
+```sh
+uv run python -c "from fast_agent.llm.model_database import ModelDatabase; print([m for m in ModelDatabase.list_models() if 'gemini' in m])"
 ```
 
 ## Running the Example
@@ -51,7 +80,7 @@ or
 uv run examples/example_agent.py
 ```
 
-Start the MCP server separately (or via your FastAgent server config) with `python src/server/mavlinkmcp.py`. For PX4 SITL, the server defaults to UDP port **14540** (`MAVLINK_PORT`).
+Start the MCP server separately (or via your FastAgent server config) with `mavlinkmcp`. For PX4 SITL, the server defaults to UDP port **14540** (`MAVLINK_PORT`).
 
 Make sure all dependencies are installed and your environment is properly configured.
 

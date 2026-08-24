@@ -2,7 +2,7 @@ import math
 import unittest
 from types import SimpleNamespace
 
-from unix_epoch_time_helpers import (
+from mavlinkmcp.unix_epoch_time_helpers import (
     normalize_unix_epoch_time,
     unix_epoch_time_status_err,
 )

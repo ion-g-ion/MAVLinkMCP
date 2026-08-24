@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from distance_sensor_helpers import (
+from mavlinkmcp.distance_sensor_helpers import (
     distance_sensor_status_err,
     normalize_distance_sensor,
 )

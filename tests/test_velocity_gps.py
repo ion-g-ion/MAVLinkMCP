@@ -2,7 +2,7 @@
 import unittest
 from types import SimpleNamespace
 
-from tool_dicts import (
+from mavlinkmcp.tool_dicts import (
     format_gps_info,
     format_velocity_ned,
 )

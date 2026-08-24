@@ -1,5 +1,5 @@
 # Add lifespan support for startup/shutdown with strong typing
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from mcp.server.fastmcp import Context, FastMCP
@@ -7,34 +7,35 @@ from typing import Tuple
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
 from mavsdk.offboard import OffboardError, PositionNedYaw
-from rc_status_helpers import normalize_rc_status, rc_status_err
-from altitude_helpers import altitude_status_err, normalize_altitude
-from landed_state_helpers import (
+from .rc_status_helpers import normalize_rc_status, rc_status_err
+from .altitude_helpers import altitude_status_err, normalize_altitude
+from .landed_state_helpers import (
     landed_state_status_err,
     normalize_landed_state,
 )
-from distance_sensor_helpers import (
+from .distance_sensor_helpers import (
     distance_sensor_status_err,
     normalize_distance_sensor,
 )
+import argparse
 import asyncio
 import os
 import logging
-from endpoint import build_system_address
-from tool_dicts import format_gps_info, format_velocity_ned
+from .endpoint import build_system_address
+from .tool_dicts import format_gps_info, format_velocity_ned
 
-from armed_air_helpers import normalize_in_air, normalize_is_armed, status_err as aa_status_err
+from .armed_air_helpers import normalize_in_air, normalize_is_armed, status_err as aa_status_err
 
-from home_position_helpers import normalize_home_position, status_err as home_status_err
-from attitude_helpers import normalize_attitude_euler, status_err as attitude_status_err
-from health_helpers import normalize_health_flags, status_err as health_status_err
-from wind_helpers import normalize_wind, wind_status_err
-from odometry_helpers import normalize_odometry, odometry_status_err
-from unix_epoch_time_helpers import (
+from .home_position_helpers import normalize_home_position, status_err as home_status_err
+from .attitude_helpers import normalize_attitude_euler, status_err as attitude_status_err
+from .health_helpers import normalize_health_flags, status_err as health_status_err
+from .wind_helpers import normalize_wind, wind_status_err
+from .odometry_helpers import normalize_odometry, odometry_status_err
+from .unix_epoch_time_helpers import (
     normalize_unix_epoch_time,
     unix_epoch_time_status_err,
 )
-from vtol_state_helpers import (
+from .vtol_state_helpers import (
     normalize_vtol_state,
     vtol_state_status_err,
 )
@@ -185,39 +186,168 @@ def clamp_imu_count(n, min_n: int = 1, max_n: int = 100) -> int:
     return v
 
 
+def connect_timeout_s(value: str | float | None = None) -> float:
+    """Seconds to keep trying the MAVLink link before declaring it unreachable."""
+    if value is None:
+        value = os.environ.get("MAVLINK_CONNECT_TIMEOUT", "60")
+    try:
+        t = float(str(value).strip())
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"MAVLINK_CONNECT_TIMEOUT must be a number: {value!r}") from e
+    if t != t:  # NaN
+        raise ValueError("MAVLINK_CONNECT_TIMEOUT must be finite (got NaN)")
+    if t in (float("inf"), float("-inf")):
+        raise ValueError("MAVLINK_CONNECT_TIMEOUT must be finite")
+    if t <= 0:
+        raise ValueError(f"MAVLINK_CONNECT_TIMEOUT must be positive: {t}")
+    return t
+
+
+# Link states for MAVLinkConnector.link_state
+LINK_CONNECTING = "connecting"
+LINK_READY = "ready"
+LINK_FAILED = "failed"
+
+
 @dataclass
 class MAVLinkConnector:
     drone: System
     last_offboard_position: PositionNedYaw = field(default_factory=lambda: PositionNedYaw(0.0, 0.0, 0.0, 0.0))
+    link_state: str = LINK_CONNECTING
+    link_error: str | None = None
 
-@asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
-    """Manage application lifecycle with type-safe context"""
-    # Initialize on startup
-    system_address = build_system_address()
-    drone = System()
+    @property
+    def is_linked(self) -> bool:
+        """True once the vehicle answered and tools may talk to it."""
+        return self.link_state == LINK_READY
+
+    def link_failure(self) -> str:
+        """Why tools cannot run right now (empty string when they can)."""
+        if self.link_state == LINK_READY:
+            return ""
+        if self.link_state == LINK_CONNECTING:
+            return "MAVLink link is still coming up; retry shortly"
+        return self.link_error or "MAVLink link unavailable"
+
+
+def resolve_connector(ctx: Context) -> Tuple[MAVLinkConnector | None, dict | None]:
+    """Return ``(connector, None)`` when the link is up, else ``(None, error)``.
+
+    Tools go through this instead of reaching into the lifespan context, so an
+    absent vehicle yields a structured failure rather than a MAVSDK call that
+    blocks forever.
+    """
+    connector = ctx.request_context.lifespan_context
+    if not connector.is_linked:
+        return None, tool_err(
+            connector.link_failure(), connected=False, link_state=connector.link_state
+        )
+    return connector, None
+
+
+def resolve_drone(ctx: Context) -> Tuple[System | None, dict | None]:
+    """Return ``(drone, None)`` when the link is up, else ``(None, error)``."""
+    connector, link_err = resolve_connector(ctx)
+    if link_err is not None:
+        return None, link_err
+    return connector.drone, None
+
+
+async def wait_for_connection(drone: System) -> None:
+    """Block until the autopilot reports a live connection."""
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            return
+
+
+async def wait_for_position_estimate(drone: System) -> None:
+    """Block until the vehicle has a global or home position estimate."""
+    async for health in drone.telemetry.health():
+        if health.is_global_position_ok or health.is_home_position_ok:
+            logger.info(
+                "Global position %s, home position %s",
+                health.is_global_position_ok,
+                health.is_home_position_ok,
+            )
+            return
+
+
+async def connect_vehicle(drone: System, system_address: str) -> None:
+    """Open the MAVLink link and wait for the autopilot to answer."""
     logger.info("Connecting to drone at %s", system_address)
     await drone.connect(system_address=system_address)
 
     logger.info("Waiting for drone to connect at %s", system_address)
-    async for state in drone.core.connection_state():
-        if state.is_connected:
-            logger.info("Connected to drone at %s!", system_address)
-            break
+    await wait_for_connection(drone)
 
-    logger.info("Waiting for drone to have a global position estimate...")
-    logger.info(f"{drone.telemetry.health()}")
-    async for health in drone.telemetry.health():
-        if health.is_global_position_ok or health.is_home_position_ok:
-            logger.info(f"Global position {health.is_global_position_ok}, home position {health.is_home_position_ok}")
-            break
 
+async def bring_up_link(connector: MAVLinkConnector, system_address: str, timeout_s: float) -> None:
+    """Establish the link in the background and record the outcome.
+
+    Runs outside the handshake path, so a slow or absent vehicle delays tools
+    rather than the MCP session itself.
+    """
     try:
-        yield MAVLinkConnector(drone=drone)
+        await asyncio.wait_for(connect_vehicle(connector.drone, system_address), timeout_s)
+    except asyncio.TimeoutError:
+        connector.link_state = LINK_FAILED
+        connector.link_error = (
+            f"no MAVLink vehicle reachable on {system_address} after {timeout_s:g}s"
+        )
+        logger.error("%s; tools will fail closed", connector.link_error)
+        return
+    except Exception as e:
+        connector.link_state = LINK_FAILED
+        connector.link_error = f"MAVLink link to {system_address} failed: {e}"
+        logger.error("%s; tools will fail closed", connector.link_error)
+        return
+
+    connector.link_state = LINK_READY
+    logger.info("Connected to drone at %s!", system_address)
+
+    # A position estimate is worth waiting for but must not gate tools: GPS can
+    # keep converging long after the vehicle is reachable and commandable.
+    logger.info("Waiting for drone to have a global position estimate...")
+    try:
+        await asyncio.wait_for(wait_for_position_estimate(connector.drone), timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "No global/home position estimate after %gs; position tools may fail", timeout_s
+        )
+    except Exception as e:
+        logger.warning("Could not read position health: %s", e)
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
+    """Manage application lifecycle with type-safe context.
+
+    The link is brought up in the background on purpose. An MCP client blocks on
+    the ``initialize`` handshake until this context manager yields, and on the
+    HTTP transports the SDK enters the lifespan before anything drains the
+    session's read stream -- so connecting here would wedge the handshake until
+    the client gave up and tore the session down. Instead we yield at once and
+    let tools fail closed until the vehicle answers.
+    """
+    # Initialize on startup
+    system_address = build_system_address()
+    timeout_s = connect_timeout_s()
+    connector = MAVLinkConnector(drone=System())
+
+    link_task = asyncio.create_task(bring_up_link(connector, system_address, timeout_s))
+    try:
+        yield connector
     finally:
         # Cleanup on shutdown
+        link_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await link_task
         logger.info("Disconnecting drone")
-        await drone.close()
+        try:
+            await connector.drone.close()
+        except Exception as e:
+            logger.warning("Error closing drone connection: %s", e)
+
 
 # Pass lifespan to server
 
@@ -270,7 +400,9 @@ mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 @mcp.tool()
 async def arm_drone(ctx: Context) -> dict:
     """Arm the drone. Returns a structured status dict (fail-closed on errors)."""
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Arming")
     try:
         await drone.action.arm()
@@ -293,7 +425,9 @@ async def get_position(ctx: Context) -> dict:
     Returns:
         dict: A dict with the position.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching drone position")
 
     try:
@@ -369,7 +503,9 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
     Returns:
         dict: structured status (success or error).
     """
-    connector = ctx.request_context.lifespan_context
+    connector, link_err = resolve_connector(ctx)
+    if link_err is not None:
+        return link_err
     drone = connector.drone
 
     try:
@@ -414,7 +550,9 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
     Returns:
         dict: structured status including the altitude actually commanded.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         altitude = clamp_takeoff_altitude(takeoff_altitude)
     except ValueError as e:
@@ -440,7 +578,9 @@ async def land(ctx: Context) -> dict:
     Returns:
         dict: structured status (success or error).
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Initiating landing")
     try:
         await drone.action.land()
@@ -452,7 +592,9 @@ async def land(ctx: Context) -> dict:
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
     """Print and return status text from the drone (structured status on failure)."""
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for status_text in drone.telemetry.status_text():
             logger.info(f"Status: {status_text.type}: {status_text.text}")
@@ -476,7 +618,9 @@ async def get_imu(ctx: Context, n: int = 1) -> dict:
     Returns:
         dict: structured status with imu list and count, or error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     telemetry = drone.telemetry
 
     try:
@@ -530,7 +674,9 @@ async def print_mission_progress(ctx: Context) -> dict:
     Returns:
         dict: structured status with current/total, or error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for mission_progress in drone.mission.mission_progress():
             logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
@@ -560,7 +706,9 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     Returns:
         dict: structured status (success with waypoint_count, or error).
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
 
     try:
         points = validate_mission_points(mission_points)
@@ -615,7 +763,9 @@ async def get_home_position(ctx: Context) -> dict:
 
     Uses mavsdk telemetry.home() when available.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for home in drone.telemetry.home():
             return normalize_home_position(
@@ -632,7 +782,9 @@ async def get_home_position(ctx: Context) -> dict:
 @mcp.tool()
 async def get_is_armed(ctx: Context) -> dict:
     """Return whether the vehicle reports armed=True (fail-closed dict)."""
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for armed in drone.telemetry.armed():
             return normalize_is_armed(bool(armed))
@@ -645,7 +797,9 @@ async def get_is_armed(ctx: Context) -> dict:
 @mcp.tool()
 async def get_in_air(ctx: Context) -> dict:
     """Return whether the vehicle reports in_air=True (fail-closed dict)."""
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for in_air in drone.telemetry.in_air():
             return normalize_in_air(bool(in_air))
@@ -666,7 +820,9 @@ async def get_velocity_ned(ctx: Context) -> dict:
     Returns:
         dict: success payload with velocity_ned or failed error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching velocity NED")
     try:
         async for velocity in drone.telemetry.velocity_ned():
@@ -687,7 +843,9 @@ async def get_gps_info(ctx: Context) -> dict:
     Returns:
         dict: success payload with gps_info or failed error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching GPS info")
     try:
         async for info in drone.telemetry.gps_info():
@@ -707,7 +865,9 @@ async def get_battery(ctx: Context) -> dict:
     Returns:
         dict: status + battery fields, or failed with error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching battery")
     try:
         async for bat in drone.telemetry.battery():
@@ -741,7 +901,9 @@ async def get_heading(ctx: Context) -> dict:
     Returns:
         dict: status + heading_deg normalized to [0, 360), or failed with error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching heading")
     try:
         # Prefer dedicated heading stream; fall back to attitude Euler yaw_deg
@@ -774,7 +936,9 @@ async def disarm_drone(ctx: Context) -> dict:
     Returns:
         dict: status success or failed with error message.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Disarming")
     try:
         await drone.action.disarm()
@@ -794,7 +958,9 @@ async def return_to_launch(ctx: Context) -> dict:
     Returns:
         dict: status success or failed with error message.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Return to launch")
     try:
         await drone.action.return_to_launch()
@@ -812,7 +978,9 @@ async def get_flight_mode(ctx: Context) -> dict:
     Returns:
         dict: structured status with mode string, or error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         flight_mode = await drone.telemetry.flight_mode().__anext__()
         logger.info(f"FlightMode: {flight_mode}")
@@ -834,7 +1002,9 @@ async def get_attitude_euler(ctx: Context) -> dict:
 
     Returns a structured dict for LLM/MCP clients. Non-finite samples fail closed.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching attitude_euler")
     try:
         async for att in drone.telemetry.attitude_euler():
@@ -857,7 +1027,9 @@ async def get_health(ctx: Context) -> dict:
 
     Structured dict for MCP agents. Missing stream fails closed.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching health telemetry")
     try:
         async for h in drone.telemetry.health():
@@ -886,7 +1058,9 @@ async def get_rc_status(ctx: Context) -> dict:
 
     Structured dict for MCP agents. Missing stream fails closed.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching RC status telemetry")
     try:
         async for rc in drone.telemetry.rc_status():
@@ -911,7 +1085,9 @@ async def get_altitude(ctx: Context) -> dict:
 
     Structured dict for MCP agents. Core AMSL/relative must be finite.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching altitude telemetry")
     try:
         async for alt in drone.telemetry.altitude():
@@ -935,7 +1111,9 @@ async def get_landed_state(ctx: Context) -> dict:
 
     Structured fail-closed dict for MCP agents (gates arm / takeoff / land).
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching landed_state telemetry")
     try:
         async for state in drone.telemetry.landed_state():
@@ -953,7 +1131,9 @@ async def get_distance_sensor(ctx: Context) -> dict:
 
     Structured fail-closed dict: current_distance_m required finite >= 0.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching distance_sensor telemetry")
     try:
         async for ds in drone.telemetry.distance_sensor():
@@ -981,7 +1161,9 @@ async def get_wind(ctx: Context) -> dict:
 
     Structured fail-closed dict; finite wind_*_ned_m_s required when present.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching wind telemetry")
     try:
         async for w in drone.telemetry.wind():
@@ -1016,7 +1198,9 @@ async def get_odometry(ctx: Context) -> dict:
 
     Structured fail-closed dict for agent/navigation consumers.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     logger.info("Fetching odometry telemetry")
     try:
         async for odom in drone.telemetry.odometry():
@@ -1043,7 +1227,9 @@ async def get_unix_epoch_time(ctx: Context) -> dict:
         dict: {"status": "success", "unix_epoch_time": {"unix_epoch_s": float}}
               or {"status": "failed", "error": str}
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for sample in drone.telemetry.unix_epoch_time():
             return normalize_unix_epoch_time(sample)
@@ -1061,7 +1247,9 @@ async def get_vtol_state(ctx: Context) -> dict:
     Returns:
         dict: {"status": "success", "vtol_state": str} or {"status": "failed", "error": str}
     """
-    drone = ctx.request_context.lifespan_context.drone
+    drone, link_err = resolve_drone(ctx)
+    if link_err is not None:
+        return link_err
     try:
         async for state in drone.telemetry.vtol_state():
             return normalize_vtol_state(state)
@@ -1071,6 +1259,128 @@ async def get_vtol_state(ctx: Context) -> dict:
         return vtol_state_status_err(str(e))
 
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _apply_transport_security(host: str, allowed_hosts, allow_any_host: bool, parser) -> None:
+    """Keep Host/Origin checks meaningful when binding off localhost.
+
+    FastMCP auto-enables DNS-rebinding protection only for localhost, and decides
+    it at construction time. Mutating ``settings.host`` afterwards would leave the
+    localhost allowlist in place and silently reject every remote request, so the
+    allowlist is rebuilt here to match the bind that was actually requested.
+    """
+    # Imported lazily: only the HTTP transports need it, so the stdio path stays
+    # importable with a minimal mcp surface.
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if allow_any_host:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+        logger.warning(
+            "DNS-rebinding protection disabled: any Host header is accepted. "
+            "These tools can arm and fly a vehicle - use a trusted network only."
+        )
+        return
+
+    if allowed_hosts:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(allowed_hosts),
+            allowed_origins=[f"http://{h}" for h in allowed_hosts]
+            + [f"https://{h}" for h in allowed_hosts],
+        )
+        return
+
+    if host not in LOCAL_HOSTS:
+        parser.error(
+            f"--host {host} binds beyond localhost, exposing tools that can arm and fly a "
+            "vehicle. Declare the Host headers to accept with --allowed-host (repeatable, "
+            "e.g. --allowed-host drone.lan:8000), or pass --allow-any-host to turn the "
+            "check off deliberately."
+        )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Console-script entry point for the ``mavlinkmcp`` command.
+
+    Serves MCP over stdio by default, so a chat app can spawn the server by
+    absolute path (``<venv>/bin/mavlinkmcp``) from any working directory. The
+    HTTP transports expose the same tools over a network socket instead.
+
+    Args:
+        argv: Argument list to parse. Defaults to ``sys.argv[1:]``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="mavlinkmcp",
+        description="MAVLink MCP server: MAVSDK-backed vehicle tools for LLM agents.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http", "sse"),
+        default="stdio",
+        help="MCP transport (default: stdio). 'sse' is deprecated in the MCP spec; "
+        "prefer 'streamable-http' for new clients.",
+    )
+    parser.add_argument(
+        "--host", default=None, metavar="ADDR",
+        help="Bind address for the HTTP transports (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port", type=int, default=None, metavar="PORT",
+        help="Bind port for the HTTP transports (default: 8000).",
+    )
+    parser.add_argument(
+        "--path", default=None, metavar="PATH",
+        help="Endpoint path for --transport streamable-http (default: /mcp).",
+    )
+    parser.add_argument(
+        "--allowed-host", action="append", default=None, metavar="HOST[:PORT]",
+        help="Host header to accept when binding off localhost; repeatable. "
+        "Wildcards allowed, e.g. 'drone.lan:*'.",
+    )
+    parser.add_argument(
+        "--allow-any-host", action="store_true",
+        help="Disable DNS-rebinding protection entirely. Trusted networks only.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.transport == "stdio":
+        http_only = [
+            name
+            for name, value in (
+                ("--host", args.host),
+                ("--port", args.port),
+                ("--path", args.path),
+                ("--allowed-host", args.allowed_host),
+            )
+            if value is not None
+        ]
+        if args.allow_any_host:
+            http_only.append("--allow-any-host")
+        if http_only:
+            parser.error(
+                f"{', '.join(http_only)} require{'s' if len(http_only) == 1 else ''} "
+                "an HTTP transport (--transport streamable-http)"
+            )
+        mcp.run(transport="stdio")
+        return
+
+    if args.host is not None:
+        mcp.settings.host = args.host
+    if args.port is not None:
+        mcp.settings.port = args.port
+    if args.path is not None:
+        mcp.settings.streamable_http_path = args.path
+
+    _apply_transport_security(mcp.settings.host, args.allowed_host, args.allow_any_host, parser)
+
+    logger.info(
+        "Serving MCP over %s at %s:%s", args.transport, mcp.settings.host, mcp.settings.port
+    )
+    mcp.run(transport=args.transport)
+
+
 if __name__ == "__main__":
-    # Run the server
-    mcp.run(transport='stdio')
+    main()

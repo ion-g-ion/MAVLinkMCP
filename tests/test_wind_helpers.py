@@ -1,7 +1,7 @@
 import unittest
 import math
 
-from wind_helpers import normalize_wind, wind_status_err
+from mavlinkmcp.wind_helpers import normalize_wind, wind_status_err
 
 
 class TestWindHelpers(unittest.TestCase):

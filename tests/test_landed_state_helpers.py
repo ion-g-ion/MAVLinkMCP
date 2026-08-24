@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from landed_state_helpers import (
+from mavlinkmcp.landed_state_helpers import (
     KNOWN_STATES,
     landed_state_status_err,
     normalize_landed_state,

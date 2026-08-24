@@ -1,6 +1,6 @@
 import unittest
 
-from health_helpers import normalize_health_flags, status_err
+from mavlinkmcp.health_helpers import normalize_health_flags, status_err
 
 
 class TestHealthHelpers(unittest.TestCase):

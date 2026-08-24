@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 import math
 
-from odometry_helpers import normalize_odometry, odometry_status_err
+from mavlinkmcp.odometry_helpers import normalize_odometry, odometry_status_err
 
 
 class TestOdometryHelpers(unittest.TestCase):

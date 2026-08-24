@@ -1,6 +1,6 @@
 import unittest
 
-from rc_status_helpers import normalize_rc_status, rc_status_err
+from mavlinkmcp.rc_status_helpers import normalize_rc_status, rc_status_err
 
 
 class TestRcStatusHelpers(unittest.TestCase):
