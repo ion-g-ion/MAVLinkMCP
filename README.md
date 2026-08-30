@@ -178,15 +178,134 @@ uv run examples/example_agent.py
 
 Export your LLM provider key as documented under `examples/` (never commit secrets). The example uses `fast-agent-mcp` / FastAgent and the `mavlink_mcp` server entry.
 
+## Flight plans
+
+The server can generate, store, check and fly coverage missions. The point of
+the split is that a route becomes reviewable *before* it reaches the vehicle:
+
+```
+get_map_view -> create_survey_plan -> render_plan_view
+  -> validate_plan -> preflight_check -> upload_plan
+  -> verify_uploaded_plan -> start_mission
+```
+
+### Seeing the ground
+
+`get_map_view` returns a georeferenced satellite view as an **image** together
+with its exact transform. Identify a feature in the picture, report its corners
+as **pixels**, and let the server convert them — a vision model is good at
+pointing at a field and bad at inventing latitudes, so it never has to:
+
+```
+get_map_view()                       # centred on the vehicle
+  -> [image, {view_id, center, meters_per_pixel, drone: {pixel, heading_deg}, ...}]
+
+create_survey_plan(name="Front Field", view_id=..., polygon_pixels=[[430,180], ...],
+                   altitude_m=40, camera={...})
+```
+
+`map_transform` converts in either direction against a stored view. Pass
+`orientation="heading_up"` to rotate the view so the vehicle's forward direction
+is up, which makes "the field in front of the drone" a question about the
+picture rather than about compass arithmetic.
+
+Supplying `latitude_deg`/`longitude_deg` instead looks anywhere and needs no
+vehicle at all — plans can be authored and costed at a desk and flown later.
+
+### Map imagery
+
+Fetching a basemap is the **only** outbound network use in this server. Tiles
+are fetched on demand, cached to disk, and pinned to the configured provider's
+host; a tile that fails renders as flat grey and the response says so, because
+the georeferencing is still exact.
+
+| Variable | Meaning |
+|---|---|
+| `MAVLINKMCP_MAP_PROVIDER` | `esri` (default, global aerial imagery, no key) · `osm` (street map, not imagery) · `mapbox` / `maptiler` (need a key) · `custom` · `none` |
+| `MAVLINKMCP_MAP_API_KEY` | key for the providers that need one |
+| `MAVLINKMCP_MAP_TILE_URL` | XYZ template for `custom`, e.g. a self-hosted tile server |
+| `MAVLINKMCP_MAP_IMAGE_MODE` | `image` (default) or `path`, for clients that cannot display images |
+
+`none` disables all network access and renders a correctly georeferenced blank
+canvas — geometry and overlays still work, there is just nothing to identify
+ground features from. `prefetch_map_area` warms the tile cache before going
+somewhere without connectivity.
+
+**Attribution is not optional.** Each provider's terms require it; the notice is
+drawn onto every view and returned in the payload.
+
+Views are rendered as JPEG, 768 px by default and capped at 1024. That ceiling is
+about tokens rather than bytes: image cost scales with pixel area, so a 768 px
+view is roughly 790 tokens and a 1024 px one about 1400.
+
+### Where plans live
+
+```
+$MAVLINKMCP_PLANS_DIR/          # default $XDG_DATA_HOME/mavlinkmcp
+├── plans/north-field/
+│   ├── meta.json               # name, head revision, timestamps
+│   ├── rev-001.json
+│   └── rev-002.json
+├── views/                      # rendered map views + their geotransforms
+└── tiles/                      # tile cache
+```
+
+Plans are plain JSON and outlive the MCP session, so they can be read, diffed
+and edited by a human without this server running.
+
+A revision's **generated content is immutable**: `revise_plan` re-runs the
+generator with new parameters and writes a new revision rather than editing
+waypoints, so the stored parameters and the stored path can never disagree.
+Only the lifecycle annotations (`status`, `checks`, `estimate`, `uploaded`)
+change in place.
+
+### The upload gate
+
+A plan moves `draft -> validated -> uploaded`, and **`upload_plan` refuses
+anything that has not passed `validate_plan`**. Any revision starts as a draft,
+so a change always invalidates the previous check.
+
+`validate_plan` reports findings; only an `error` blocks. The most valuable one
+is `FAR_FROM_HOME` — a polygon drawn on the wrong map produces a perfectly
+well-formed plan on the other side of the world, and distance from home is what
+catches it. `preflight_check` then adds a live go/no-go from health, GPS fix,
+battery and landed state, and `verify_uploaded_plan` downloads the mission back
+off the vehicle and diffs it against what was reviewed.
+
+Note that the plan's lifecycle state is reported as `plan_status`. The `status`
+key is the call envelope (`success` / `failed`) that every tool in this server
+returns, and it stays that.
+
+### Survey geometry
+
+`create_survey_plan` generates a boustrophedon (lawnmower) sweep. Line spacing
+comes from either `line_spacing_m` or a `camera`; giving both is refused rather
+than silently preferring one. A camera also sets the photo trigger distance and
+reports ground sample distance:
+
+```python
+camera = {"sensor_width_mm": 13.2, "focal_length_mm": 8.8,
+          "image_width_px": 5472, "image_height_px": 3648,
+          "front_overlap": 0.75, "side_overlap": 0.65}
+# at 40 m: 1.10 cm/px, 60 m footprint, 21 m line spacing, 10 m trigger distance
+```
+
+Omitting `sweep_angle_deg` sweeps along the area's long axis, which minimises
+turns — where survey time and battery actually go.
+
 ### Safety note
 
 MCP tools can arm, take off, and move a vehicle. Prefer SITL. Keep a human ready to kill switch / land. Tool failures should be treated as fail-closed by the client.
 
+Flight plans add a review step rather than removing the need for one: `validate_plan` and `preflight_check` catch the mistakes that are mechanical (a route in the wrong place, no GPS fix, not enough battery), not the ones that are a matter of judgement. Look at `render_plan_view` before you fly.
+
 ## Tests
 
-The unit tests are offline — they exercise the pure validation/normalization
-helpers and do not import `mavsdk` or talk to a vehicle. Run them from the
-repository root:
+The unit tests are offline — they exercise the pure validation, geometry and
+normalization helpers, never import `mavsdk`, never talk to a vehicle, and never
+make a network request. Tile fetching is exercised by injecting a fake fetcher,
+and the rendering path runs under `MAVLINKMCP_MAP_PROVIDER=none`. Run them from
+the repository root:
 
 ```bash
 python -m unittest discover
@@ -195,6 +314,33 @@ python -m unittest discover
 Tests import the helpers by their real package paths
 (`from mavlinkmcp.endpoint import ...`), so the project must be installed in the
 environment you run them with (`uv sync` or `pip install -e .`).
+
+### SITL integration tests
+
+`tests_sitl/` covers what the offline suite structurally cannot: the MAVSDK
+handshake, the connection guard, and the mission-protocol round-trip. These need
+a real autopilot, so `sitl/` builds a PX4 image running the SIH dynamics model —
+no Gazebo, no GPU, ~120 MB, ~7 MB of RAM:
+
+```bash
+docker build -t px4-sih:v1.14.3 sitl/
+docker run -d --rm --name px4 --network host \
+  -e PX4_HOME_LAT=473977420 -e PX4_HOME_LON=85455940 \
+  px4-sih:v1.14.3
+python -m unittest discover
+```
+
+`network_mode: host` is required: PX4 sends to 14540 on loopback and will not
+talk off-localhost without `MAV_2_BROADCAST=1`, so published ports do not help.
+That works on Linux and on GitHub runners, but not on Docker Desktop for macOS.
+
+Home coordinates are **scaled int32 in 1e-7 degrees, not decimal degrees** —
+`px4-rc.simulator` passes `PX4_HOME_LAT` straight into `SIH_LOC_LAT0`. Passing
+`47.397742` truncates to `47` and silently flies the vehicle 150 km away.
+
+With no vehicle listening these tests skip rather than fail, after a ~1.5s
+probe, so `python -m unittest discover` still works on a machine without Docker.
+Raise `MAVLINKMCP_SITL_PROBE_TIMEOUT` if a slow container is being missed.
 
 ## Contributing
 

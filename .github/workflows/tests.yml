@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The existing suite: offline, no mavsdk import, no network, seconds to run.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run python -m unittest discover
+
+  # Integration against a real PX4. This is the part the offline suite cannot
+  # cover: the mavsdk handshake, the connection state machine in bring_up_link,
+  # and mission upload//download round-trips.
+  sitl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      # network=host because PX4 sends to 14540 on localhost and will not talk
+      # off-localhost without MAV_2_BROADCAST=1; published ports do not help.
+      - name: Start PX4 SITL
+        run: |
+          docker run -d --rm --name px4 --network host \
+            -e PX4_HOME_LAT=473977420 \
+            -e PX4_HOME_LON=85455940 \
+            ghcr.io/${{ github.repository_owner }}/px4-sih:v1.14.3
+
+      - name: Run SITL tests
+        run: uv run python -m unittest discover -s tests_sitl -t .
+
+      - name: PX4 log on failure
+        if: failure()
+        run: docker logs px4

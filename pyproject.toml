@@ -14,6 +14,14 @@ mcp = ">=1.6,<2"
 # similarly-named `mcp-agent`, which has no FastAgent at all.
 fast-agent-mcp = "*"
 mcp-server = "*"
+# Flight-plan geometry: shapely does polygon clipping/offsetting for the coverage
+# patterns, pyproj builds the local metric CRS the patterns are computed in.
+shapely = ">=2.0"
+pyproj = ">=3.6"
+# Map views: pillow composites/annotates tiles, httpx fetches them. Both already
+# arrive transitively via mcp/fast-agent, but a transitive dep is not a contract.
+pillow = ">=10.0"
+httpx = ">=0.27"
 
 [project]
 name = "mavlinkmcp"
@@ -28,7 +36,15 @@ dependencies = [
     # FastAgent ships in `fast-agent-mcp` (import: `fast_agent`), NOT in LastMile's
     # similarly-named `mcp-agent`, which has no FastAgent at all.
     "fast-agent-mcp",
-    "mcp-server"
+    "mcp-server",
+    # Flight-plan geometry: shapely does polygon clipping/offsetting for the
+    # coverage patterns, pyproj builds the local metric CRS they are computed in.
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    # Map views: pillow composites/annotates tiles, httpx fetches them. Both
+    # already arrive transitively via mcp/fast-agent, but that is not a contract.
+    "pillow>=10.0",
+    "httpx>=0.27"
 ]
 requires-python = ">=3.10"
 

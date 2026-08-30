@@ -1,0 +1,16 @@
+# Local SITL for development:  docker compose -f sitl/docker-compose.yml up
+#
+# The MCP server binds udpin://0.0.0.0:14540 and PX4 sends *to* 14540 on
+# localhost, so the container needs the host's network namespace. PX4 refuses
+# to talk off-localhost unless MAV_2_BROADCAST=1, which makes port publishing
+# ineffective here -- network_mode: host is the working configuration on Linux.
+services:
+  px4:
+    image: ghcr.io/OWNER/px4-sih:v1.14.3   # or: build: .
+    network_mode: host
+    environment:
+      # Scaled int32, 1e-7 degrees -- not decimal degrees. See Dockerfile.
+      PX4_HOME_LAT: "473977420"
+      PX4_HOME_LON: "85455940"
+      # Raise to run the physics faster than wall clock; 1 = real time.
+      PX4_SIM_SPEED_FACTOR: "1"
