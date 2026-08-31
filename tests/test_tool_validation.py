@@ -43,6 +43,20 @@ def _load_helpers():
 
             return deco
 
+        # Resources and prompts register at import time exactly like tools, so
+        # the stub has to accept them or ``server.py`` never finishes loading.
+        def resource(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
+        def prompt(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
         def run(self, *a, **k):
             pass
 
@@ -143,6 +157,21 @@ class TestToolShapes(unittest.TestCase):
         err = self.m.tool_err("nope")
         self.assertEqual(err["status"], "failed")
         self.assertIn("nope", err["error"])
+
+    def test_sent_is_not_success(self):
+        r = self.m.tool_sent("takeoff", ["get_landed_state"], commanded_altitude_m=5.0)
+        # The whole point: an acked command must not read as a finished one.
+        self.assertEqual(r["status"], "command_sent")
+        self.assertNotEqual(r["status"], "success")
+        self.assertIs(r["completed"], False)
+        self.assertEqual(r["command"], "takeoff")
+        self.assertEqual(r["verify_with"], ["get_landed_state"])
+        self.assertEqual(r["commanded_altitude_m"], 5.0)
+        self.assertIn("get_landed_state", r["detail"])
+
+    def test_sent_accepts_a_bare_string_check(self):
+        self.assertEqual(self.m.tool_sent("arm_drone", "get_is_armed")["verify_with"],
+                         ["get_is_armed"])
 
 
 if __name__ == "__main__":

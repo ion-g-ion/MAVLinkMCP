@@ -38,6 +38,20 @@ def _load_module():
 
             return deco
 
+        # Resources and prompts register at import time exactly like tools, so
+        # the stub has to accept them or ``server.py`` never finishes loading.
+        def resource(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
+        def prompt(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
         def run(self, *a, **k):
             pass
 

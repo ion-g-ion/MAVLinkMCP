@@ -358,6 +358,33 @@ def load_view(view_id: str, root: Optional[Path] = None) -> MapView:
     return MapView.from_dict(_read_json(path))
 
 
+def list_views(limit: int = MAX_VIEWS, root: Optional[Path] = None) -> List[MapView]:
+    """Every stored view, newest first, capped at ``limit``.
+
+    Mirrors ``list_plans``: an unreadable view is skipped rather than sinking the
+    listing, because one corrupt file should not hide every other.
+    """
+    directory = views_dir(root)
+    if not directory.is_dir():
+        return []
+
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            # A view pruned mid-listing sorts last rather than raising.
+            return 0.0
+
+    metas = sorted(directory.glob("v*.json"), key=mtime, reverse=True)
+    out: List[MapView] = []
+    for meta in metas[: max(0, int(limit))]:
+        try:
+            out.append(MapView.from_dict(_read_json(meta)))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return out
+
+
 def prune_views(max_views: int = MAX_VIEWS, root: Optional[Path] = None) -> int:
     """Drop the oldest views past the cap. Returns how many were removed."""
     directory = views_dir(root)

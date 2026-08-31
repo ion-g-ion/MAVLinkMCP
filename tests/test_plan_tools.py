@@ -437,9 +437,9 @@ class TestPreflight(ToolTestCase):
 class TestMissionControl(ToolTestCase):
     def test_start_pause_clear_and_jump(self):
         live = self.live()
-        self.assertEqual(run(self.m.start_mission(live))["status"], "success")
+        self.assertEqual(run(self.m.start_mission(live))["status"], "command_sent")
         self.assertTrue(self.mission.started)
-        self.assertEqual(run(self.m.pause_mission(live))["status"], "success")
+        self.assertEqual(run(self.m.pause_mission(live))["status"], "command_sent")
         self.assertTrue(self.mission.paused)
         self.assertEqual(run(self.m.set_current_waypoint(live, 3))["status"], "success")
         self.assertEqual(self.mission.current_item, 3)

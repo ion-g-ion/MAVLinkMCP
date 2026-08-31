@@ -299,6 +299,51 @@ MCP tools can arm, take off, and move a vehicle. Prefer SITL. Keep a human ready
 
 Flight plans add a review step rather than removing the need for one: `validate_plan` and `preflight_check` catch the mistakes that are mechanical (a route in the wrong place, no GPS fix, not enough battery), not the ones that are a matter of judgement. Look at `render_plan_view` before you fly.
 
+## Prompts
+
+A tool description says what one call does. None of them says why the pipeline is
+split, why `upload_plan` refuses a draft, or why a model should answer in pixels
+and never in latitudes. That context is served as MCP **prompts**, which most
+clients surface as slash commands:
+
+| Prompt | Covers |
+|---|---|
+| `mavlink_overview` | how the server is organised, the `status` / `plan_status` envelope, the background link, the safety posture |
+| `telemetry_guide` | which readings exist, and why a failed read is an unknown rather than a zero |
+| `map_view_guide` | georeferenced imagery: pixels over latitudes, orientation, token cost, providers, attribution |
+| `plan_lifecycle_guide` | plan states, immutable revisions, and what the upload gate is for |
+| `survey_walkthrough(area?, altitude_m?)` | end-to-end, from looking at the ground to a mission running |
+| `preflight_briefing(plan_id)` | the go/no-go sequence to run against one stored plan |
+
+The wording lives in [`guides.py`](src/mavlinkmcp/guides.py) and interpolates the
+limits from the modules that enforce them, so a number quoted in a briefing
+cannot drift away from the number actually checked.
+
+## Resources
+
+Read-only, URI-addressable descriptions of what is already on disk. A tool call
+is an action with a token cost; a resource is a lookup a client can do on its
+own. None of these fetches a tile or touches the vehicle.
+
+| URI | Contents |
+|---|---|
+| `mavlinkmcp://map/providers` | every known tile provider and the active configuration, with attribution |
+| `mavlinkmcp://map/limits` | the bounds a map call is checked against: size, radius, zoom, tile caps, store limits |
+| `mavlinkmcp://map/cache` | what the tile cache and view store hold, and where they live |
+| `mavlinkmcp://map/views` | every rendered view still on disk, newest first |
+| `mavlinkmcp://map/views/{view_id}` | one view's full georeference: centre, scale, rotation, bbox, ground corners |
+| `mavlinkmcp://map/views/{view_id}/image` | the rendered JPEG, so a view can be looked at again without re-fetching tiles |
+| `mavlinkmcp://plans/{plan_id}/geojson` | a plan's head revision as GeoJSON — area, path and numbered waypoints |
+
+**API keys never appear in a resource.** Every client on a session can read every
+resource, so the provider block reports whether a key is configured and never
+what it is, and tile templates lose their query string on the way out.
+
+The index resources report a misconfiguration in the payload rather than raising
+— "the provider needs a key it does not have" is the answer someone reading
+`mavlinkmcp://map/providers` came for. The ones addressed by id raise instead:
+there is no partial answer for a view that does not exist.
+
 ## Tests
 
 The unit tests are offline — they exercise the pure validation, geometry and

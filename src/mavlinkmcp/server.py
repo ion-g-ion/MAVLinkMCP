@@ -52,6 +52,8 @@ from .vtol_state_helpers import (
 from . import (
     coverage_helpers,
     geo_helpers,
+    guides,
+    map_resources,
     map_source,
     map_view,
     plan_check_helpers,
@@ -133,6 +135,40 @@ def tool_ok(payload=None, **extra):
 def tool_err(message, **payload):
     """Structured failure payload for MCP tool clients (fail-closed)."""
     return {"status": "failed", "error": str(message), **payload}
+
+
+def tool_sent(command: str, verify_with, payload=None, **extra):
+    """Structured payload for a command the autopilot accepted but has not finished.
+
+    MAVSDK's action, offboard and mission verbs return once the vehicle
+    acknowledges the command -- not once the manoeuvre is complete. A takeoff
+    that is acked and then aborted, or that is followed by an auto-disarm,
+    looks identical at the call site to one that climbed to altitude.
+
+    Reporting that as ``{"status": "success"}`` invites an agent to tell the
+    operator the drone is at 5 m when it is sitting disarmed on the ground, so
+    these commands get their own status instead. ``verify_with`` names the
+    telemetry tools that answer what actually happened; call them before
+    reporting the outcome to a human.
+    """
+    checks = [verify_with] if isinstance(verify_with, str) else list(verify_with)
+    out = {
+        "status": "command_sent",
+        "command": command,
+        "completed": False,
+        "detail": (
+            f"The autopilot accepted the {command} command. It is NOT confirmed "
+            f"complete -- the vehicle may not have moved. Confirm with: "
+            f"{', '.join(checks)}."
+        ),
+        "verify_with": checks,
+    }
+    if isinstance(payload, dict):
+        out.update(payload)
+    elif payload is not None:
+        out["result"] = payload
+    out.update(extra)
+    return out
 
 
 def _image_result(path, payload):
@@ -375,20 +411,39 @@ def format_battery(remaining_percent: float | None = None, remaining_fraction: f
     return out
 
 
-mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
+# `instructions` rides the MCP initialize response, so unlike the prompts below it
+# reaches the model without the client having to ask for it. The operating contract
+# an agent cannot fly safely without lives there; the long-form guides stay prompts.
+mcp = FastMCP(
+    "MAVLink MCP",
+    instructions=guides.server_instructions(),
+    lifespan=app_lifespan,
+)
 
 
 # ARM
 @mcp.tool()
 async def arm_drone(ctx: Context) -> dict:
-    """Arm the drone. Returns a structured status dict (fail-closed on errors)."""
+    """Arm the drone.
+
+    The autopilot acknowledges the arm command; it does not promise the vehicle
+    stays armed. PX4 disarms itself again if nothing takes off within a few
+    seconds (COM_DISARM_PRENAV), so an arm that "succeeded" can be undone before
+    the next tool call.
+
+    Returns:
+        dict: ``{"status": "command_sent", "command": "arm_drone", ...}`` when
+            the autopilot accepted the command -- confirm the vehicle is
+            actually armed with get_is_armed. Errors are fail-closed
+            ``{"status": "failed"}``.
+    """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
         return link_err
     logger.info("Arming")
     try:
         await drone.action.arm()
-        return tool_ok(armed=True)
+        return tool_sent("arm_drone", ["get_is_armed"])
     except Exception as e:
         logger.error("Arm failed: %s", e)
         return tool_err(e, armed=False)
@@ -400,6 +455,13 @@ async def get_position(ctx: Context) -> dict:
     """
     Get the position of the drone in latitude/longitude degrees and altitude in meters.
     The drone must be connected and have a global position estimate.
+
+    ``absolute_altitude_m`` is AMSL. ``relative_altitude_m`` is measured from the
+    recorded *home* position, which is not the same reference as get_altitude's
+    ``altitude_relative_m`` (measured from the takeoff point) and not what
+    takeoff's altitude argument means. If this reads high while get_landed_state
+    says ON_GROUND, home is set wrong -- say so to the operator rather than
+    reporting the vehicle as airborne.
 
     Args:
         ctx (Context): The context of the request.
@@ -483,7 +545,10 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
         yaw (float): yaw change.
 
     Returns:
-        dict: structured status (success or error).
+        dict: ``{"status": "command_sent", ...}`` with the offboard setpoint
+            that was sent. The setpoint is a target, not an arrival: the
+            vehicle flies to it over the following seconds, and may never
+            reach it. Confirm with get_position and get_velocity_ned.
     """
     connector, link_err = resolve_connector(ctx)
     if link_err is not None:
@@ -510,11 +575,13 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
         # Send the updated position
         logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
         await drone.offboard.set_position_ned(connector.last_offboard_position)
-        return tool_ok(
-            north_m=connector.last_offboard_position.north_m,
-            east_m=connector.last_offboard_position.east_m,
-            down_m=connector.last_offboard_position.down_m,
-            yaw_deg=connector.last_offboard_position.yaw_deg,
+        return tool_sent(
+            "move_to_relative",
+            ["get_position", "get_velocity_ned"],
+            target_north_m=connector.last_offboard_position.north_m,
+            target_east_m=connector.last_offboard_position.east_m,
+            target_down_m=connector.last_offboard_position.down_m,
+            target_yaw_deg=connector.last_offboard_position.yaw_deg,
         )
     except Exception as e:
         logger.error("Relative move failed: %s", e)
@@ -522,15 +589,42 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
 
 @mcp.tool()
 async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
-    """Command the drone to initiate takeoff and ascend to a specified altitude. The drone must be armed.
+    """Command the drone to initiate takeoff. The drone must be armed.
+
+    This sends the takeoff command and returns as soon as the autopilot
+    acknowledges it. It does NOT wait for the climb, and a vehicle that acks
+    the command can still stay on the ground -- a bad altitude estimate, a
+    rejected mode change or a pre-navigation auto-disarm all look like an
+    accepted takeoff here.
+
+    **The altitude is relative, not absolute.** ``takeoff_altitude`` is metres
+    above the point the vehicle lifts off from -- ask for 5 and it climbs 5 m,
+    whether it launched from a beach or a 2000 m plateau. It is never an AMSL
+    figure, so do not add it to the vehicle's current absolute altitude.
+    Afterwards it corresponds to ``altitude_relative_m`` from get_altitude.
+
+    Note that get_position reports a *different* relative altitude: that one is
+    measured from the recorded home position, and the two disagree whenever
+    home was set badly or at another elevation. When they conflict, trust
+    get_altitude's ``altitude_relative_m`` for takeoff progress, and treat a
+    large get_position ``relative_altitude_m`` on a vehicle that get_landed_state
+    calls ON_GROUND as a bad home fix worth reporting to the operator -- takeoff
+    is unreliable in that state.
 
     Args:
         ctx (Context): The context of the request.
-        takeoff_altitude (float): Altitude in meters after takeoff. Default is 3.0 m.
-            Values are clamped to [0.5, 120.0] for fail-closed agent use.
+        takeoff_altitude (float): Metres above the takeoff point to climb to,
+            not an absolute/AMSL altitude. Default is 3.0 m. Values are clamped
+            to [0.5, 120.0] for fail-closed agent use.
 
     Returns:
-        dict: structured status including the altitude actually commanded.
+        dict: ``{"status": "command_sent", "command": "takeoff",
+            "commanded_altitude_m": float, "completed": false, ...}``. Do not
+            report the drone as airborne on the strength of this. Poll
+            get_landed_state until it reads IN_AIR and check get_altitude
+            against the commanded altitude; if it still reads ON_GROUND after
+            a few seconds the takeoff did not happen, and get_is_armed will
+            often show the vehicle disarmed itself.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
@@ -545,7 +639,11 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
     try:
         await drone.action.set_takeoff_altitude(altitude)
         await drone.action.takeoff()
-        return tool_ok(takeoff_altitude_m=altitude)
+        return tool_sent(
+            "takeoff",
+            ["get_landed_state", "get_altitude", "get_is_armed"],
+            commanded_altitude_m=altitude,
+        )
     except Exception as e:
         logger.error("Takeoff failed: %s", e)
         return tool_err(e)
@@ -554,11 +652,16 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
 async def land(ctx: Context) -> dict:
     """Command the drone to initiate landing at its current location.
 
+    Returns once the autopilot accepts the command. The descent takes as long
+    as it takes; this does not wait for touchdown.
+
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: structured status (success or error).
+        dict: ``{"status": "command_sent", "command": "land", ...}``. The
+            vehicle is descending, not landed. Poll get_landed_state until it
+            reads ON_GROUND before telling an operator the drone is down.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
@@ -566,7 +669,7 @@ async def land(ctx: Context) -> dict:
     logger.info("Initiating landing")
     try:
         await drone.action.land()
-        return tool_ok(landing=True)
+        return tool_sent("land", ["get_landed_state", "get_altitude"])
     except Exception as e:
         logger.error("Land failed: %s", e)
         return tool_err(e)
@@ -912,11 +1015,16 @@ async def get_heading(ctx: Context) -> dict:
 async def disarm_drone(ctx: Context) -> dict:
     """Disarm the drone when it is safe to do so (typically on ground).
 
+    Returns once the autopilot accepts the command. A disarm requested in
+    flight is normally refused by the autopilot, and that refusal may arrive
+    after this returns.
+
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: status success or failed with error message.
+        dict: ``{"status": "command_sent", "command": "disarm_drone", ...}``.
+            Confirm with get_is_armed before treating the vehicle as safe.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
@@ -924,7 +1032,7 @@ async def disarm_drone(ctx: Context) -> dict:
     logger.info("Disarming")
     try:
         await drone.action.disarm()
-        return tool_ok({"disarmed": True})
+        return tool_sent("disarm_drone", ["get_is_armed", "get_landed_state"])
     except Exception as e:
         logger.error(f"Disarm failed: {e}")
         return tool_err(e)
@@ -934,11 +1042,16 @@ async def disarm_drone(ctx: Context) -> dict:
 async def return_to_launch(ctx: Context) -> dict:
     """Command the drone to return to launch (RTL).
 
+    Returns once the autopilot accepts the mode change. The flight home, and
+    the landing that follows it, happen over the following minutes.
+
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: status success or failed with error message.
+        dict: ``{"status": "command_sent", "command": "return_to_launch", ...}``.
+            The drone is on its way, not home. Track it with get_flight_mode
+            (expect RETURN_TO_LAUNCH), get_position and get_landed_state.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
@@ -946,7 +1059,10 @@ async def return_to_launch(ctx: Context) -> dict:
     logger.info("Return to launch")
     try:
         await drone.action.return_to_launch()
-        return tool_ok({"rtl": True})
+        return tool_sent(
+            "return_to_launch",
+            ["get_flight_mode", "get_position", "get_landed_state"],
+        )
     except Exception as e:
         logger.error(f"RTL failed: {e}")
         return tool_err(e)
@@ -1064,6 +1180,11 @@ async def get_rc_status(ctx: Context) -> dict:
 async def get_altitude(ctx: Context) -> dict:
     """
     Get altitude telemetry (AMSL, relative, optional local/terrain).
+
+    ``altitude_relative_m`` is measured from the takeoff point, so it is the
+    field to compare against a takeoff's commanded altitude. It uses a different
+    reference from get_position's ``relative_altitude_m`` (measured from home);
+    when the two disagree, prefer this one for climb progress.
 
     Structured dict for MCP agents. Core AMSL/relative must be finite.
     """
@@ -2367,15 +2488,23 @@ async def start_mission(ctx: Context) -> dict:
     MAVSDK has no separate resume verb: starting again after pause_mission
     continues from the current item.
 
+    Returns once the autopilot accepts the command. The mission then flies for
+    as long as it takes.
+
     Returns:
-        dict: structured status, or an error.
+        dict: ``{"status": "command_sent", "command": "start_mission", ...}``.
+            Started is not finished: follow progress with
+            print_mission_progress and is_mission_finished.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
         return link_err
     try:
         await drone.mission.start_mission()
-        return tool_ok(mission_started=True)
+        return tool_sent(
+            "start_mission",
+            ["print_mission_progress", "is_mission_finished", "get_flight_mode"],
+        )
     except Exception as e:
         logger.error("start_mission failed: %s", e)
         return tool_err(e)
@@ -2385,15 +2514,24 @@ async def start_mission(ctx: Context) -> dict:
 async def pause_mission(ctx: Context) -> dict:
     """Pause the running mission; the vehicle holds position.
 
+    Returns once the autopilot accepts the command; the vehicle settles into
+    the hold over the next few seconds.
+
     Returns:
-        dict: structured status, or an error.
+        dict: ``{"status": "command_sent", "command": "pause_mission", ...}``.
+            Confirm the hold with get_flight_mode before assuming the vehicle
+            has stopped. Resume with start_mission.
     """
     drone, link_err = resolve_drone(ctx)
     if link_err is not None:
         return link_err
     try:
         await drone.mission.pause_mission()
-        return tool_ok(mission_paused=True, resume_with="start_mission")
+        return tool_sent(
+            "pause_mission",
+            ["get_flight_mode", "print_mission_progress"],
+            resume_with="start_mission",
+        )
     except Exception as e:
         logger.error("pause_mission failed: %s", e)
         return tool_err(e)
@@ -2513,6 +2651,199 @@ async def download_mission_as_plan(ctx: Context, name: str) -> dict:
     except (ValueError, OSError, TypeError) as e:
         return tool_err(e)
     return tool_ok(_plan_summary(plan, next_step="validate_plan"))
+
+
+# =====================================================================
+# Resources: what is already on disk, addressable by URI.
+#
+# A tool call is an action with a token cost; a resource is a lookup a
+# client can do on its own. Everything here is map-shaped and already
+# persisted -- the configured tile provider, the caps a map call is
+# checked against, the tile cache, and every rendered view with its exact
+# geotransform. Nothing here fetches a tile or touches the vehicle.
+#
+# The split in error handling is deliberate. An index that cannot be
+# fully built still reports what it could learn, because "the provider is
+# misconfigured" is the answer someone reading it needs. A resource
+# addressed by id raises instead: there is no partial answer for a view
+# that does not exist.
+# =====================================================================
+
+
+@mcp.resource(
+    "mavlinkmcp://map/providers",
+    name="map_providers",
+    title="Map tile providers",
+    description=(
+        "Every tile provider this server knows and the one currently configured, "
+        "with its attribution. API keys are never included."
+    ),
+    mime_type="application/json",
+)
+def map_providers_resource() -> dict:
+    """Tile providers known to this server, and the active configuration."""
+    return map_resources.provider_catalog()
+
+
+@mcp.resource(
+    "mavlinkmcp://map/limits",
+    name="map_limits",
+    title="Map view limits",
+    description=(
+        "The bounds a map call is checked against: view size and radius, zoom "
+        "range, tile caps and store limits. Read before choosing radius_m/size_px."
+    ),
+    mime_type="application/json",
+)
+def map_limits_resource() -> dict:
+    """The caps and defaults that govern map views and the plan store."""
+    return map_resources.map_limits()
+
+
+@mcp.resource(
+    "mavlinkmcp://map/cache",
+    name="map_cache",
+    title="Map tile cache",
+    description=(
+        "What the on-disk tile cache and view store currently hold, and where "
+        "they live."
+    ),
+    mime_type="application/json",
+)
+def map_cache_resource() -> dict:
+    """Tile and view storage occupancy."""
+    return map_resources.cache_report()
+
+
+@mcp.resource(
+    "mavlinkmcp://map/views",
+    name="map_views",
+    title="Rendered map views",
+    description=(
+        "Every map view still on disk, newest first, with the view_id that "
+        "map_transform and create_survey_plan accept."
+    ),
+    mime_type="application/json",
+)
+def map_views_resource() -> dict:
+    """Index of stored map views."""
+    return map_resources.view_index()
+
+
+@mcp.resource(
+    "mavlinkmcp://map/views/{view_id}",
+    name="map_view_transform",
+    title="Map view georeference",
+    description=(
+        "One stored view's full georeference: centre, scale, rotation, bounding "
+        "box and ground corners."
+    ),
+    mime_type="application/json",
+)
+def map_view_resource(view_id: str) -> dict:
+    """The exact transform for one rendered view."""
+    return map_resources.view_detail(view_id)
+
+
+@mcp.resource(
+    "mavlinkmcp://map/views/{view_id}/image",
+    name="map_view_image",
+    title="Map view image",
+    description=(
+        "The rendered JPEG for a stored view, so it can be looked at again "
+        "without paying for another round of tile fetches."
+    ),
+    mime_type="image/jpeg",
+)
+def map_view_image_resource(view_id: str) -> bytes:
+    """The JPEG previously rendered for a view."""
+    return map_resources.view_image(view_id)
+
+
+@mcp.resource(
+    "mavlinkmcp://plans/{plan_id}/geojson",
+    name="plan_geojson",
+    title="Flight plan as GeoJSON",
+    description=(
+        "A stored plan's head revision as GeoJSON: the area of interest, the "
+        "flight path and the numbered waypoints."
+    ),
+    mime_type="application/geo+json",
+)
+def plan_geojson_resource(plan_id: str) -> dict:
+    """The head revision of a plan, as a GeoJSON FeatureCollection."""
+    # load_plan raises FileNotFoundError/ValueError, which FastMCP turns into a
+    # resource error naming the plan -- the right outcome for an id that is wrong.
+    return plan_to_geojson(plan_store.load_plan(plan_id))
+
+
+# =====================================================================
+# Prompts: how the parts above fit together.
+#
+# A tool description says what one call does; none of them says why the
+# pipeline is split, why upload_plan refuses a draft, or why a model must
+# answer in pixels rather than latitudes. The wording lives in guides.py
+# so these stay as thin as every tool wrapper in this file.
+# =====================================================================
+
+
+@mcp.prompt(title="MAVLink MCP overview")
+def mavlink_overview() -> str:
+    """How this server is organised, its call convention, and its safety posture."""
+    return guides.overview()
+
+
+@mcp.prompt(title="Reading vehicle telemetry")
+def telemetry_guide() -> str:
+    """Which readings are available and what a failed read does and does not mean."""
+    return guides.telemetry_guide()
+
+
+@mcp.prompt(title="Working with map views")
+def map_view_guide() -> str:
+    """Georeferenced imagery: pixels over latitudes, orientation, cost and providers."""
+    return guides.map_view_guide()
+
+
+@mcp.prompt(title="Flight plan lifecycle")
+def plan_lifecycle_guide() -> str:
+    """Why plans have states, why revisions are immutable, and what the upload gate is for."""
+    return guides.plan_lifecycle_guide()
+
+
+@mcp.prompt(
+    title="Plan and fly a survey",
+    # Given explicitly so the Args block below stays for readers of this file
+    # rather than being shown to every client listing the prompt.
+    description=(
+        "End-to-end walkthrough from looking at the ground to a mission running. "
+        "Optionally takes the area to survey and an altitude in metres."
+    ),
+)
+def survey_walkthrough(area: str = "", altitude_m: str = "") -> str:
+    """End-to-end walkthrough from looking at the ground to a mission running.
+
+    Args:
+        area: what the operator wants surveyed, in their own words.
+        altitude_m: requested survey altitude in metres.
+    """
+    return guides.survey_walkthrough(area, altitude_m)
+
+
+@mcp.prompt(
+    title="Pre-flight briefing",
+    description=(
+        "The go/no-go sequence to run against one stored plan before flying it. "
+        "Takes the plan_id to brief on."
+    ),
+)
+def preflight_briefing(plan_id: str) -> str:
+    """The go/no-go sequence to run against one stored plan before flying it.
+
+    Args:
+        plan_id: the stored plan to brief on.
+    """
+    return guides.preflight_briefing(plan_id)
 
 
 def _apply_transport_security(host: str, allowed_hosts, allow_any_host: bool, parser) -> None:

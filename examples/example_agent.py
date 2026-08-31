@@ -18,15 +18,22 @@ fast = FastAgent("Human Input", config_path=str(CONFIG_PATH))
 
 
 # Define the agent
+# Just the role. The operating rules are NOT restated here -- they ship with the
+# server, in its MCP `instructions` and in the tool descriptions themselves, so
+# they reach whichever client connects rather than only this one.
 @fast.agent(
-    instruction="An AI agent that controls a drone.",
+    instruction=(
+        "You are an agent that flies a drone over MAVLink, on behalf of a human "
+        "operator who is watching."
+    ),
     human_input=True,
     servers=["mavlink_mcp"],
 )
 async def main() -> None:
     async with fast.run() as agent:
-        # this usually causes the LLM to request the Human Input Tool
-        await agent("Start a conversation.")
+        # No hardcoded opener: the first message is whatever the user types at the
+        # interactive prompt, so the agent stays idle until asked for something.
+        # Pressing Enter on an empty line sends "STOP", which ends the session.
         await agent.prompt(default_prompt="STOP")
 
 
